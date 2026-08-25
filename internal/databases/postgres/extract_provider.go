@@ -27,13 +27,19 @@ func (t ExtractProviderImpl) Get(
 	dbDataDir string,
 	createNewIncrementalFiles bool,
 ) (IncrementalTarInterpreter, []internal.ReaderMaker, []internal.ReaderMaker, error) {
-	interpreter := t.getTarInterpreter(dbDataDir, backup, filesToUnwrap, createNewIncrementalFiles)
+	interpreter := t.getTarInterpreter(dbDataDir, backup, filesToUnwrap, createNewIncrementalFiles, skipRedundantTars)
 	concurrentTarsToExtract, sequentialTarsToExtract, err := t.FilesToExtractProviderImpl.Get(ctx, backup, filesToUnwrap, skipRedundantTars)
 	return interpreter, concurrentTarsToExtract, sequentialTarsToExtract, err
 }
 
 func (t ExtractProviderImpl) getTarInterpreter(dbDataDir string, backup Backup,
-	filesToUnwrap map[string]bool, createNewIncrementalFiles bool) IncrementalTarInterpreter {
-	return NewFileTarInterpreter(dbDataDir, *backup.SentinelDto, *backup.FilesMetadataDto,
+	filesToUnwrap map[string]bool, createNewIncrementalFiles, earlyStop bool) IncrementalTarInterpreter {
+	interpreter := NewFileTarInterpreter(dbDataDir, *backup.SentinelDto, *backup.FilesMetadataDto,
 		filesToUnwrap, createNewIncrementalFiles)
+	if earlyStop {
+		// Whoever asked not to download the tarballs that hold nothing useful also wants the ones
+		// that do to be read only as far as they have to be.
+		interpreter.EnableEarlyStop()
+	}
+	return interpreter
 }

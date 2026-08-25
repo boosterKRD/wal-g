@@ -265,7 +265,9 @@ func (backup *Backup) unwrapToEmptyDirectory(
 		return err
 	}
 
-	return backup.unwrapOld(ctx, dbDataDirectory, filesToUnwrap, createIncrementalFiles, extractProv)
+	// A delta restore knows exactly which files it wants, so the tarballs holding none of them do
+	// not have to be downloaded at all.
+	return backup.unwrapOld(ctx, dbDataDirectory, filesToUnwrap, createIncrementalFiles, extractProv, deltaRestore)
 }
 
 // TODO : unit tests
@@ -273,10 +275,10 @@ func (backup *Backup) unwrapToEmptyDirectory(
 func (backup *Backup) unwrapOld(
 	ctx context.Context,
 	dbDataDirectory string, filesToUnwrap map[string]bool, createIncrementalFiles bool,
-	extractProv ExtractProvider,
+	extractProv ExtractProvider, skipRedundantTars bool,
 ) error {
 	tarInterpreter, concurrentTarsToExtract, sequentialTarsToExtract, err := extractProv.Get(
-		ctx, *backup, filesToUnwrap, false, dbDataDirectory, createIncrementalFiles)
+		ctx, *backup, filesToUnwrap, skipRedundantTars, dbDataDirectory, createIncrementalFiles)
 	if err != nil {
 		return err
 	}

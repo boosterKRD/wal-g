@@ -53,6 +53,18 @@ type TarInterpreter interface {
 	Interpret(reader io.Reader, header *tar.Header) error
 }
 
+// SelectiveTarInterpreter is a TarInterpreter that only acts on some of the entries of a tarball
+// and knows in advance how many of them there are. That lets extraction stop as soon as the last
+// of them has been handled, instead of reading the rest of the tarball for nothing.
+type SelectiveTarInterpreter interface {
+	TarInterpreter
+	// InterestingEntryCount returns how many entries of the named tarball will be acted upon, and
+	// whether that number is known at all.
+	InterestingEntryCount(tarName string) (int, bool)
+	// IsInterestingEntry tells whether the named entry is one of those counted above.
+	IsInterestingEntry(name string) bool
+}
+
 type DevNullWriter struct {
 	io.WriteCloser
 	statPrinter sync.Once
@@ -77,7 +89,17 @@ var _ io.Writer = &DevNullWriter{}
 // TODO : unit tests
 // Extract exactly one tar bundle.
 func extractOneTar(tarInterpreter TarInterpreter, source io.Reader) error {
+	_, err := extractOneTarUntilDone(tarInterpreter, source, "")
+	return err
+}
+
+// extractOneTarUntilDone extracts a tarball and reports whether it stopped before reaching the end
+// of the stream, which it does once every entry the interpreter cares about has been handled. The
+// caller must not keep reading the stream in that case.
+func extractOneTarUntilDone(tarInterpreter TarInterpreter, source io.Reader, tarName string) (stoppedEarly bool, err error) {
 	tarReader := tar.NewReader(source)
+
+	selective, remaining := interestingEntries(tarInterpreter, tarName)
 
 	for {
 		header, err := tarReader.Next()
@@ -85,15 +107,42 @@ func extractOneTar(tarInterpreter TarInterpreter, source io.Reader) error {
 			break
 		}
 		if err != nil {
-			return errors.Wrap(err, "extractOne: tar extract failed")
+			return false, errors.Wrap(err, "extractOne: tar extract failed")
 		}
 
 		err = tarInterpreter.Interpret(tarReader, header)
 		if err != nil {
-			return errors.Wrap(err, "extractOne: Interpret failed")
+			return false, errors.Wrap(err, "extractOne: Interpret failed")
+		}
+
+		if selective != nil && selective.IsInterestingEntry(header.Name) {
+			remaining--
+			if remaining <= 0 {
+				tracelog.DebugLogger.Printf("Stopping the read of '%s': everything needed from it has been extracted", tarName)
+				return true, nil
+			}
 		}
 	}
-	return nil
+	return false, nil
+}
+
+// interestingEntries returns the interpreter as a SelectiveTarInterpreter along with the number of
+// entries it is going to act on, or nil when extraction has to read the tarball to the end.
+func interestingEntries(tarInterpreter TarInterpreter, tarName string) (SelectiveTarInterpreter, int) {
+	if tarName == "" {
+		return nil, 0
+	}
+	selective, ok := tarInterpreter.(SelectiveTarInterpreter)
+	if !ok {
+		return nil, 0
+	}
+	count, known := selective.InterestingEntryCount(tarName)
+	if !known || count <= 0 {
+		// An unknown count means the tarball has to be read to the end. A count of zero means the
+		// tarball should not have been downloaded at all, so leave it to the normal path.
+		return nil, 0
+	}
+	return selective, count
 }
 
 func extractNonTar(tarInterpreter TarInterpreter, source io.Reader, path string, fileType FileType, mode int64) error {
@@ -184,8 +233,9 @@ func ExtractAllWithSleeper(ctx context.Context, tarInterpreter TarInterpreter, f
 func extractFile(tarInterpreter TarInterpreter, extractingReader io.Reader, fileClosure ReaderMaker) error {
 	switch fileClosure.FileType() {
 	case TarFileType:
-		err := extractOneTar(tarInterpreter, extractingReader)
-		if err == nil {
+		stoppedEarly, err := extractOneTarUntilDone(tarInterpreter, extractingReader, fileClosure.StoragePath())
+		// Reading the trailing zeros would defeat the point of stopping early.
+		if err == nil && !stoppedEarly {
 			err = readTrailingZeros(extractingReader)
 		}
 		return err

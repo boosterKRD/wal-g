@@ -30,14 +30,63 @@ type FileTarInterpreter struct {
 	UnwrapResult    *UnwrapResult
 
 	createNewIncrementalFiles bool
+	// earlyStop lets extraction stop reading a tarball once every entry it cares about has been
+	// handled. It is opt-in because it relies on TarFileSets listing every entry of a tarball,
+	// which only holds for tarballs written by the PostgreSQL composers.
+	earlyStop bool
 }
 
 func NewFileTarInterpreter(
 	dbDataDirectory string, sentinel BackupSentinelDto, filesMetadata FilesMetadataDto,
 	filesToUnwrap map[string]bool, createNewIncrementalFiles bool,
 ) *FileTarInterpreter {
-	return &FileTarInterpreter{dbDataDirectory, sentinel, filesMetadata,
-		filesToUnwrap, newUnwrapResult(), createNewIncrementalFiles}
+	return &FileTarInterpreter{
+		DBDataDirectory:           dbDataDirectory,
+		Sentinel:                  sentinel,
+		FilesMetadata:             filesMetadata,
+		FilesToUnwrap:             filesToUnwrap,
+		UnwrapResult:              newUnwrapResult(),
+		createNewIncrementalFiles: createNewIncrementalFiles,
+	}
+}
+
+// EnableEarlyStop makes extraction stop reading a tarball as soon as everything needed from it has
+// been written, instead of reading the remaining entries for nothing. On object storage this cuts
+// the download short.
+func (tarInterpreter *FileTarInterpreter) EnableEarlyStop() {
+	tarInterpreter.earlyStop = true
+}
+
+// InterestingEntryCount reports how many entries of the named tarball are going to be acted upon.
+func (tarInterpreter *FileTarInterpreter) InterestingEntryCount(tarName string) (int, bool) {
+	if !tarInterpreter.earlyStop || tarInterpreter.FilesToUnwrap == nil {
+		return 0, false
+	}
+	// Without the tar file sets there is no way to know what a tarball holds, so it has to be read
+	// to the end. This is the case for backups taken with WALG_WITHOUT_FILES_METADATA.
+	entryNames, ok := tarInterpreter.FilesMetadata.TarFileSets[tarName]
+	if !ok || len(entryNames) == 0 {
+		return 0, false
+	}
+
+	count := 0
+	for _, entryName := range entryNames {
+		if tarInterpreter.IsInterestingEntry(entryName) {
+			count++
+		}
+	}
+	return count, true
+}
+
+// IsInterestingEntry tells whether an entry is going to be acted upon during extraction. Files that
+// are not being unwrapped are skipped, but anything that is not a regular file of the backup, a
+// directory or a link for instance, is always created and therefore always counts.
+func (tarInterpreter *FileTarInterpreter) IsInterestingEntry(name string) bool {
+	if tarInterpreter.FilesToUnwrap == nil || tarInterpreter.FilesToUnwrap[name] {
+		return true
+	}
+	_, isBackupFile := tarInterpreter.FilesMetadata.Files[name]
+	return !isBackupFile
 }
 
 func (tarInterpreter *FileTarInterpreter) GetUnwrapResult() *UnwrapResult {

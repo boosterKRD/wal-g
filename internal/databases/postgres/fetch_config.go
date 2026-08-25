@@ -6,7 +6,7 @@ import (
 )
 
 func NewFetchConfig(dbDataDirectory string, backup Backup, rootFolder storage.Folder, spec *TablespaceSpec,
-	filesToUnwrap map[string]bool, skipRedundantTars bool, manager ExtractProvider) *FetchConfig {
+	filesToUnwrap map[string]bool, skipRedundantTars, deltaRestore bool, manager ExtractProvider) *FetchConfig {
 	fetchConfig := &FetchConfig{
 		filesToUnwrap:     filesToUnwrap,
 		missingBlocks:     make(map[string]int64),
@@ -15,6 +15,7 @@ func NewFetchConfig(dbDataDirectory string, backup Backup, rootFolder storage.Fo
 		rootFolder:        rootFolder,
 		dbDataDirectory:   dbDataDirectory,
 		skipRedundantTars: skipRedundantTars,
+		deltaRestore:      deltaRestore,
 		extractProv:       manager,
 	}
 	return fetchConfig
@@ -29,7 +30,10 @@ type FetchConfig struct {
 	rootFolder        storage.Folder
 	dbDataDirectory   string
 	skipRedundantTars bool
-	extractProv       ExtractProvider
+	// deltaRestore narrows filesToUnwrap down to the files that differ from the backup, which also
+	// means the tarballs holding none of them do not have to be downloaded.
+	deltaRestore bool
+	extractProv  ExtractProvider
 }
 
 func (fc *FetchConfig) SkipRedundantFiles(unwrapResult *UnwrapResult) {

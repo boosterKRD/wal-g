@@ -56,6 +56,7 @@ func GetFetcherNew(dbDataDirectory, fileMask, restoreSpecPath string, skipRedund
 			spec,
 			filesToUnwrap,
 			skipRedundantTars,
+			deltaRestore,
 			extractProv,
 		)
 		err = deltaFetchRecursionNew(ctx, config)
@@ -95,7 +96,7 @@ func deltaFetchRecursionNew(ctx context.Context, cfg *FetchConfig) error {
 			return err
 		}
 		unwrapResult, err := backup.unwrapNew(ctx, cfg.dbDataDirectory, cfg.filesToUnwrap,
-			false, cfg.skipRedundantTars, cfg.extractProv)
+			false, cfg.skipRedundantTars || cfg.deltaRestore, cfg.extractProv)
 		if err != nil {
 			return err
 		}
@@ -121,6 +122,6 @@ func deltaFetchRecursionNew(ctx context.Context, cfg *FetchConfig) error {
 	tracelog.InfoLogger.Printf("%s reached. Applying base backup... \n",
 		*(sentinelDto.BackupStartLSN))
 	_, err = backup.unwrapNew(ctx, cfg.dbDataDirectory, cfg.filesToUnwrap,
-		false, cfg.skipRedundantTars, cfg.extractProv)
+		false, cfg.skipRedundantTars || cfg.deltaRestore, cfg.extractProv)
 	return err
 }

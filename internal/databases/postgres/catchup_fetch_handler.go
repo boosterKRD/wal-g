@@ -27,7 +27,7 @@ func HandleCatchupFetch(ctx context.Context, folder storage.Folder, dbDirectory,
 	if useNewUnwrap {
 		_, err = pgBackup.unwrapNew(ctx, dbDirectory, filesToUnwrap, true, false, ExtractProviderImpl{})
 	} else {
-		err = pgBackup.unwrapOld(ctx, dbDirectory, filesToUnwrap, true, ExtractProviderImpl{})
+		err = pgBackup.unwrapOld(ctx, dbDirectory, filesToUnwrap, true, ExtractProviderImpl{}, false)
 	}
 
 	tracelog.ErrorLogger.FatalfOnError("Failed unwrap backup: %v", err)
