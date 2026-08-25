@@ -75,6 +75,10 @@ To prevent WAL-G from falling back to a full scan delta backup when it fails to 
 
 To configure the size of one backup bundle (in bytes). Smaller size causes granularity and more optimal, faster recovering. It also increases the number of storage requests, so it can costs you much money. Default size is 1 GB (`1 << 30 - 1` bytes).
 
+* `WALG_TAR_DEDICATED_FILE_SIZE`
+
+To configure the size (in bytes) from which a file is packed into a backup bundle of its own instead of sharing one with other files. Since [delta restore](#delta-restore) can only skip or fetch a whole bundle, keeping large files on their own is what lets it skip them. Defaults to half of `WALG_TAR_SIZE_THRESHOLD`. Set it to a smaller value to make delta restore more effective, at the cost of more objects in storage.
+
 * `WALG_TAR_DISABLE_FSYNC`
 
 Disable calling fsync after writing files when extracting tar files.
@@ -168,6 +172,28 @@ Since this feature involves both backup creation and restore process, in order t
 ```bash  
 wal-g backup-fetch /path LATEST --reverse-unpack --skip-redundant-tars
 ```
+
+#### Delta restore
+
+Normally `backup-fetch` requires the destination directory to be empty. With `--delta-restore` it can restore into a directory that still holds an older copy of the cluster: every local file is compared against the checksum stored in the backup, files that already match are kept, and only the ones that differ are fetched.
+
+```bash
+wal-g backup-fetch /path LATEST --delta-restore
+```
+
+The cluster must be stopped: WAL-G refuses to run if `postmaster.pid` is present. As a safety net, if the destination directory holds no `PG_VERSION`, delta restore turns itself off rather than writing into a directory that may not be PGDATA at all, and the restore is then refused because the directory is not empty. The same happens for a backup that carries no checksums, which is any backup taken by a version of WAL-G older than this feature, or taken with `WALG_WITHOUT_FILES_METADATA`.
+
+`global/pg_control` is removed before the restore starts and written back at the very end, so a cluster left behind by an interrupted delta restore cannot be started.
+
+How much this saves depends on how the changed files are spread across backup bundles: a bundle is downloaded only if at least one of the files in it has to be restored, and its download is cut short once the last needed file has been read out of it. Large files get a bundle of their own (see `WALG_TAR_DEDICATED_FILE_SIZE`), so for a database with big tables the saving is close to the share of unchanged data.
+
+Files that are in the destination directory but not in the backup are **reported and left in place**:
+
+```
+INFO: would remove invalid file '/var/lib/postgresql/17/main/base/1/leftover'
+```
+
+These are changes the local cluster diverged by. Unlike pgBackRest, WAL-G does not remove them yet, so a restored cluster may still hold data that was not in the backup. Files under directories WAL-G never backs up, `pg_wal` for instance, are not reported, and neither is anything inside tablespaces.
 
 #### Partial restore (experimental)
 

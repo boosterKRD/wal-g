@@ -80,6 +80,9 @@ services:
       &&  mkdir -p /export/fullcopycomposerbucket
       &&  mkdir -p /export/fullwithoutfilesmetadatabucket
       &&  mkdir -p /export/fullscandeltabucket
+      &&  mkdir -p /export/deltarestorebucket
+      &&  mkdir -p /export/deltarestorefallbackbucket
+      &&  mkdir -p /export/deltarestoredeltabackupbucket
       &&  mkdir -p /export/failoverstoragebucket
       &&  mkdir -p /export/partialbucket
       &&  mkdir -p /export/remotebucket
@@ -470,6 +473,21 @@ services:
     <<: *pg10_test_common
     container_name: wal-g_pg10_full_backup_rating_composer_test
     command: /tmp/tests/full_backup_rating_composer_test.sh
+
+  pg10_delta_restore_test:
+    <<: *pg10_test_common
+    container_name: wal-g_pg10_delta_restore_test
+    command: /tmp/tests/delta_restore_test.sh
+
+  pg10_delta_restore_fallback_test:
+    <<: *pg10_test_common
+    container_name: wal-g_pg10_delta_restore_fallback_test
+    command: /tmp/tests/delta_restore_fallback_test.sh
+
+  pg10_delta_restore_delta_backup_test:
+    <<: *pg10_test_common
+    container_name: wal-g_pg10_delta_restore_delta_backup_test
+    command: /tmp/tests/delta_restore_delta_backup_test.sh
 
   pg10_full_backup_database_composer_test:
     <<: *pg10_test_common
