@@ -3,6 +3,7 @@ package postgres
 import (
 	"context"
 	"net"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -11,7 +12,13 @@ import (
 )
 
 func TestServe_ReturnsOnContextCancel(t *testing.T) {
-	socketPath := filepath.Join(t.TempDir(), "walg.sock")
+	// Not t.TempDir(): it embeds the test name in the path, which is long enough to push the
+	// socket past the sun_path limit (104 bytes on darwin) and make bind fail with EINVAL.
+	tempDir, err := os.MkdirTemp("", "walg")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = os.RemoveAll(tempDir) })
+
+	socketPath := filepath.Join(tempDir, "walg.sock")
 	l, err := net.Listen("unix", socketPath)
 	require.NoError(t, err)
 
