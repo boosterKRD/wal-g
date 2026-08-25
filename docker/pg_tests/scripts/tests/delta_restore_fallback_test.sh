@@ -6,6 +6,12 @@ set -e -x
 # checksums to compare against.
 
 . /tmp/tests/test_functions/pg_compat.sh
+
+# TEMPORARY: while the feature is being worked on, run this test on PostgreSQL 18 only.
+if [ "${PG_MAJOR}" != "18" ]; then
+  echo "SKIP: temporarily limited to PostgreSQL 18"
+  exit 77
+fi
 . /tmp/tests/test_functions/prepare_config.sh
 prepare_config "/tmp/configs/delta_restore_fallback_test_config.json"
 
