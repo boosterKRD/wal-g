@@ -16,6 +16,25 @@ type BundleFiles interface {
 	GetUnderlyingMap() *sync.Map
 }
 
+// SetFileChecksum records the size and the checksum of a file that has already been added to files.
+// It is a no-op if the file is not there, so implementations that do not keep descriptions around
+// are unaffected. Must be called after the description itself has been stored.
+func SetFileChecksum(files BundleFiles, name string, size int64, checksum, checksumAlgo string) {
+	underlyingMap := files.GetUnderlyingMap()
+	rawDescription, ok := underlyingMap.Load(name)
+	if !ok {
+		return
+	}
+	description, ok := rawDescription.(BackupFileDescription)
+	if !ok {
+		return
+	}
+	description.Size = size
+	description.Checksum = checksum
+	description.ChecksumAlgo = checksumAlgo
+	underlyingMap.Store(name, description)
+}
+
 type RegularBundleFiles struct {
 	sync.Map
 }

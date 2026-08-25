@@ -52,6 +52,16 @@ type TarBallFilePackerImpl struct {
 	files                internal.BundleFiles
 	options              TarBallFilePackerOptions
 	IncrementFromChkpNum *uint32
+	// computeChecksums records a checksum for every packed file, which is what delta restore
+	// compares against. Off by default: Greenplum shares this packer and its backups should keep
+	// behaving exactly as before.
+	computeChecksums bool
+}
+
+// EnableChecksums makes the packer record a checksum of every file it packs, so that delta restore
+// can later tell whether the copy already on disk still matches the backup.
+func (p *TarBallFilePackerImpl) EnableChecksums() {
+	p.computeChecksums = true
 }
 
 func NewTarBallFilePacker(deltaMap PagedFileDeltaMap, incrementFromLsn *LSN, files internal.BundleFiles,
@@ -77,7 +87,7 @@ func (p *TarBallFilePackerImpl) UpdateDeltaMap(deltaMap PagedFileDeltaMap) {
 
 // TODO : unit tests
 func (p *TarBallFilePackerImpl) PackFileIntoTar(ctx context.Context, cfi *internal.ComposeFileInfo, tarBall internal.TarBall) error {
-	fileReadCloser, err := p.createFileReadCloser(ctx, cfi)
+	fileReadCloser, checksummer, err := p.createFileReadCloser(ctx, cfi)
 	if err != nil {
 		switch err.(type) {
 		case SkippedFileError:
@@ -128,29 +138,63 @@ func (p *TarBallFilePackerImpl) PackFileIntoTar(ctx context.Context, cfi *intern
 		return nil
 	})
 
-	return errorGroup.Wait()
+	if err := errorGroup.Wait(); err != nil {
+		return err
+	}
+
+	// Record the checksum only now: the file description is written by the goroutines above, and
+	// the checksum itself is only complete once the whole stream has been read.
+	if checksummer != nil {
+		internal.SetFileChecksum(p.files, cfi.Header.Name, cfi.FileInfo.Size(),
+			checksummer.Checksum(), internal.ChecksumAlgoXXH64)
+	}
+	return nil
 }
 
-func (p *TarBallFilePackerImpl) createFileReadCloser(ctx context.Context, cfi *internal.ComposeFileInfo) (io.ReadCloser, error) {
+// createFileReadCloser opens the file and returns the stream that goes into the tarball, together
+// with the checksummer that will hold the checksum of the whole file once that stream has been
+// read to the end. The checksummer is nil when the file is not read in full, which happens for
+// incremented files whose diff map comes from a WAL delta bitmap.
+func (p *TarBallFilePackerImpl) createFileReadCloser(
+	ctx context.Context, cfi *internal.ComposeFileInfo,
+) (io.ReadCloser, *internal.FileChecksummer, error) {
 	var fileReadCloser io.ReadCloser
+	var checksummer *internal.FileChecksummer
+	if p.computeChecksums {
+		checksummer = internal.NewFileChecksummer()
+	}
 	if cfi.IsIncremented {
 		bitmap, err := p.getDeltaBitmapFor(cfi.Path)
 		if _, ok := err.(NoBitmapFoundError); ok { // this file has changed after the start of backup, so just skip it
-			return nil, newSkippedFileError(cfi.Path)
+			return nil, nil, newSkippedFileError(cfi.Path)
 		} else if err != nil {
-			return nil, errors.Wrapf(err, "PackFileIntoTar: failed to find corresponding bitmap '%s'\n", cfi.Path)
+			return nil, nil, errors.Wrapf(err, "PackFileIntoTar: failed to find corresponding bitmap '%s'\n", cfi.Path)
 		}
+		// The increment stream itself carries only the changed pages, so it cannot be checksummed
+		// here. A full scan reads the whole file, so the page reader produces the checksum for us.
+		incrementChecksummed := bitmap == nil
 		if p.IncrementFromChkpNum != nil && orioledb.IsOrioledbDataFile(cfi.FileInfo, cfi.Path) {
+			incrementChecksummed = false
 			fileReadCloser, cfi.Header.Size, err =
 				orioledb.ReadIncrementalFile(ctx, cfi.Path, cfi.FileInfo.Size(), *p.IncrementFromChkpNum, bitmap)
 		} else {
-			fileReadCloser, cfi.Header.Size, err = ReadIncrementalFile(ctx, cfi.Path, cfi.FileInfo.Size(), *p.incrementFromLsn, bitmap)
+			// Keep the interface nil when there is no checksummer, a typed nil pointer would be
+			// taken for a usable writer.
+			var pageChecksummer io.Writer
+			if checksummer != nil {
+				pageChecksummer = checksummer
+			}
+			fileReadCloser, cfi.Header.Size, err = ReadIncrementalFileWithChecksum(
+				ctx, cfi.Path, cfi.FileInfo.Size(), *p.incrementFromLsn, bitmap, pageChecksummer)
 		}
 		if errors.Is(err, os.ErrNotExist) {
-			return nil, internal.NewFileNotExistError(cfi.Path)
+			return nil, nil, internal.NewFileNotExistError(cfi.Path)
 		}
 		switch err.(type) {
 		case nil:
+			if !incrementChecksummed {
+				checksummer = nil
+			}
 			fileReadCloser = &ioextensions.ReadCascadeCloser{
 				Reader: &io.LimitedReader{
 					R: io.MultiReader(fileReadCloser, &ioextensions.ZeroReader{}),
@@ -161,21 +205,31 @@ func (p *TarBallFilePackerImpl) createFileReadCloser(ctx context.Context, cfi *i
 		case pg_errors.InvalidBlockError: // fallback to full file backup
 			tracelog.WarningLogger.Printf("failed to read file '%s' as incremented\n", cfi.Header.Name)
 			cfi.IsIncremented = false
+			if p.computeChecksums {
+				// The partial read above already fed pages into the checksummer, so start over.
+				checksummer = internal.NewFileChecksummer()
+			}
 			fileReadCloser, err = internal.StartReadingFile(ctx, cfi.Header, cfi.FileInfo, cfi.Path)
 			if err != nil {
-				return nil, err
+				return nil, nil, err
+			}
+			if checksummer != nil {
+				fileReadCloser = checksummer.WrapReadCloser(fileReadCloser)
 			}
 		default:
-			return nil, errors.Wrapf(err, "PackFileIntoTar: failed reading incremental file '%s'\n", cfi.Path)
+			return nil, nil, errors.Wrapf(err, "PackFileIntoTar: failed reading incremental file '%s'\n", cfi.Path)
 		}
 	} else {
 		var err error
 		fileReadCloser, err = internal.StartReadingFile(ctx, cfi.Header, cfi.FileInfo, cfi.Path)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
+		}
+		if checksummer != nil {
+			fileReadCloser = checksummer.WrapReadCloser(fileReadCloser)
 		}
 	}
-	return fileReadCloser, nil
+	return fileReadCloser, checksummer, nil
 }
 
 func verifyFile(path string, fileInfo os.FileInfo, fileReader io.Reader, isIncremented bool) ([]uint32, error) {

@@ -35,6 +35,7 @@ func NewRatingTarBallComposerMaker(relFileStats RelFileStatistics,
 func (maker *RatingTarBallComposerMaker) Make(ctx context.Context, bundle *Bundle) (internal.TarBallComposer, error) {
 	composeRatingEvaluator := internal.NewDefaultComposeRatingEvaluator(bundle.IncrementFromFiles)
 	filePacker := NewTarBallFilePacker(bundle.DeltaMap, bundle.IncrementFromLsn, maker.bundleFiles, maker.filePackerOptions)
+	filePacker.EnableChecksums()
 	return NewRatingTarBallComposer(ctx, uint64(bundle.TarSizeThreshold),
 		composeRatingEvaluator,
 		bundle.IncrementFromLsn,

@@ -9,6 +9,7 @@ require (
 	github.com/Azure/azure-sdk-for-go/sdk/storage/azblob v1.8.0
 	github.com/aws/aws-sdk-go v1.55.8
 	github.com/cenkalti/backoff/v5 v5.0.3
+	github.com/cespare/xxhash/v2 v2.3.0
 	github.com/cucumber/godog v0.16.0
 	github.com/cyberdelia/lzo v1.0.0
 	github.com/go-mysql-org/go-mysql v1.16.0
@@ -145,7 +146,6 @@ require (
 	github.com/AzureAD/microsoft-authentication-library-for-go v1.7.2 // indirect
 	github.com/Microsoft/go-winio v0.6.2 // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
-	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/cloudflare/circl v1.6.3 // indirect
 	github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc // indirect
 	github.com/docker/go-connections v0.7.0 // indirect

@@ -24,6 +24,10 @@ type IncrementalPageReader struct {
 	Lsn       LSN
 	Next      []byte
 	Blocks    []uint32
+	// Checksummer, when set, receives every page read during a full scan. A full scan walks the
+	// whole file anyway, so this yields a checksum of the complete file for free. It stays nil
+	// when the diff map comes from a WAL delta bitmap, because then the file is only read in part.
+	Checksummer io.Writer
 }
 
 func (pageReader *IncrementalPageReader) Read(p []byte) (n int, err error) {
@@ -118,7 +122,15 @@ func (pageReader *IncrementalPageReader) DeltaBitmapInitialize(deltaBitmap *roar
 func (pageReader *IncrementalPageReader) FullScanInitialize() error {
 	pageBytes := make([]byte, DatabasePageSize)
 	for currentBlockNumber := uint32(0); ; currentBlockNumber++ {
-		_, err := io.ReadFull(pageReader.PagedFile, pageBytes)
+		readCount, err := io.ReadFull(pageReader.PagedFile, pageBytes)
+
+		if pageReader.Checksummer != nil && readCount > 0 {
+			// Hash what was actually read, so that a trailing partial page still ends up in the
+			// checksum and it describes the whole file.
+			if _, writeErr := pageReader.Checksummer.Write(pageBytes[:readCount]); writeErr != nil {
+				return writeErr
+			}
+		}
 
 		if err != nil {
 			if err == io.EOF || err == io.ErrUnexpectedEOF {

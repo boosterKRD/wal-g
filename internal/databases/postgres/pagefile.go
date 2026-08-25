@@ -143,6 +143,18 @@ func ReadIncrementalFile(ctx context.Context,
 	fileSize int64,
 	lsn LSN,
 	deltaBitmap *roaring.Bitmap) (fileReader io.ReadCloser, size int64, err error) {
+	return ReadIncrementalFileWithChecksum(ctx, filePath, fileSize, lsn, deltaBitmap, nil)
+}
+
+// ReadIncrementalFileWithChecksum is ReadIncrementalFile that additionally feeds every page it
+// reads into checksummer. Only a full scan reads the whole file, so when deltaBitmap is not nil
+// checksummer is left untouched and the caller ends up with no checksum for this file.
+func ReadIncrementalFileWithChecksum(ctx context.Context,
+	filePath string,
+	fileSize int64,
+	lsn LSN,
+	deltaBitmap *roaring.Bitmap,
+	checksummer io.Writer) (fileReader io.ReadCloser, size int64, err error) {
 	file, err := fsutil.OpenReadOnlyMayBeDirectIO(filePath)
 	if err != nil {
 		return nil, 0, err
@@ -154,7 +166,10 @@ func ReadIncrementalFile(ctx context.Context,
 		Closer: file,
 	}
 
-	pageReader := &IncrementalPageReader{fileReadSeekCloser, fileSize, lsn, nil, nil}
+	pageReader := &IncrementalPageReader{PagedFile: fileReadSeekCloser, FileSize: fileSize, Lsn: lsn}
+	if deltaBitmap == nil {
+		pageReader.Checksummer = checksummer
+	}
 	incrementSize, err := pageReader.initialize(deltaBitmap)
 	if err != nil {
 		utility.LoggedClose(file, "")
@@ -174,7 +189,7 @@ func ReadIncrementLocations(ctx context.Context, filePath string, fileSize int64
 		Seeker: file,
 		Closer: file,
 	}
-	pageReader := &IncrementalPageReader{fileReadSeekCloser, fileSize, lsn, nil, nil}
+	pageReader := &IncrementalPageReader{PagedFile: fileReadSeekCloser, FileSize: fileSize, Lsn: lsn}
 	err = pageReader.FullScanInitialize()
 	if err != nil {
 		return nil, err

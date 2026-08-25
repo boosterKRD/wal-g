@@ -13,10 +13,20 @@ type BackupFileDescription struct {
 	MTime         time.Time
 	CorruptBlocks *CorruptBlocksInfo `json:",omitempty"`
 	UpdatesCount  uint64
+	// Size of the file on disk at backup time. For incremented files this is the size of the
+	// whole file, not the size of the increment stored in the tarball.
+	Size int64 `json:",omitempty"`
+	// Checksum of the whole file as it was on disk at backup time, hex encoded. Empty when the
+	// file was not read in full, so it is absent for skipped files and for incremented files
+	// backed up via WAL delta bitmaps.
+	Checksum string `json:",omitempty"`
+	// Algorithm used to compute Checksum. Stored explicitly so it can be changed later without
+	// breaking backups made by older versions.
+	ChecksumAlgo string `json:",omitempty"`
 }
 
 func NewBackupFileDescription(isIncremented, isSkipped bool, modTime time.Time) *BackupFileDescription {
-	return &BackupFileDescription{isIncremented, isSkipped, modTime, nil, 0}
+	return &BackupFileDescription{IsIncremented: isIncremented, IsSkipped: isSkipped, MTime: modTime}
 }
 
 type CorruptBlocksInfo struct {

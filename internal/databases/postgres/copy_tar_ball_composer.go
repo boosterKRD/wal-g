@@ -121,6 +121,7 @@ func (maker *CopyTarBallComposerMaker) Make(ctx context.Context, bundle *Bundle)
 	files := &internal.RegularBundleFiles{}
 	tarBallFilePacker := NewTarBallFilePacker(bundle.DeltaMap,
 		bundle.IncrementFromLsn, files, maker.filePackerOptions)
+	tarBallFilePacker.EnableChecksums()
 	return NewCopyTarBallComposer(ctx, bundle.TarBallQueue, tarBallFilePacker, files,
 		bundle.Crypter, maker.previousBackup, maker.newBackupName, tarUnchangedFilesCount,
 		prevFileTar, prevTarFileSets)
