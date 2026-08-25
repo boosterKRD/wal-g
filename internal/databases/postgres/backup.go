@@ -191,8 +191,12 @@ func getFilesMetadataPath(backupName string) string {
 	return backupName + "/" + FilesMetadataName
 }
 
-func checkDBDirectoryForUnwrap(dbDataDirectory string, sentinelDto BackupSentinelDto, filesMeta FilesMetadataDto) error {
-	if !sentinelDto.IsIncremental() {
+// checkDBDirectoryForUnwrap makes sure the destination directory can be unwrapped into. A delta
+// restore knows which files it is going to overwrite, so it passes skipEmptyCheck and is allowed
+// to work in a directory that is not empty.
+func checkDBDirectoryForUnwrap(dbDataDirectory string, sentinelDto BackupSentinelDto, filesMeta FilesMetadataDto,
+	skipEmptyCheck bool) error {
+	if !sentinelDto.IsIncremental() && !skipEmptyCheck {
 		isEmpty, err := utility.IsDirectoryEmpty(dbDataDirectory, nil)
 		if err != nil {
 			return err
@@ -249,13 +253,14 @@ func setTablespacePaths(spec TablespaceSpec) error {
 	return nil
 }
 
-// check that directory is empty before unwrap
+// check that directory is empty before unwrap, unless this is a delta restore, which knows which
+// files it is going to overwrite and works in a directory that is not empty on purpose
 func (backup *Backup) unwrapToEmptyDirectory(
 	ctx context.Context,
 	dbDataDirectory string, filesToUnwrap map[string]bool, createIncrementalFiles bool,
-	extractProv ExtractProvider,
+	extractProv ExtractProvider, deltaRestore bool,
 ) error {
-	err := checkDBDirectoryForUnwrap(dbDataDirectory, *backup.SentinelDto, *backup.FilesMetadataDto)
+	err := checkDBDirectoryForUnwrap(dbDataDirectory, *backup.SentinelDto, *backup.FilesMetadataDto, deltaRestore)
 	if err != nil {
 		return err
 	}

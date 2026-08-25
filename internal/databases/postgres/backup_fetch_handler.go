@@ -64,7 +64,8 @@ func chooseTablespaceSpecification(sentinelDtoSpec, spec *TablespaceSpec) *Table
 // TODO : unit tests
 // deltaFetchRecursion function composes Backup object and recursively searches for necessary base backup
 func deltaFetchRecursionOld(ctx context.Context, backup Backup, rootFolder storage.Folder, dbDataDirectory string,
-	tablespaceSpec *TablespaceSpec, filesToUnwrap map[string]bool, extractProv ExtractProvider) error {
+	tablespaceSpec *TablespaceSpec, filesToUnwrap map[string]bool, extractProv ExtractProvider,
+	deltaRestore bool) error {
 	sentinelDto, filesMetaDto, err := backup.GetSentinelAndFilesMetadata(ctx)
 	if err != nil {
 		return err
@@ -92,7 +93,8 @@ func deltaFetchRecursionOld(ctx context.Context, backup Backup, rootFolder stora
 		if err != nil {
 			return err
 		}
-		err = deltaFetchRecursionOld(ctx, incrementFrom, rootFolder, dbDataDirectory, tablespaceSpec, baseFilesToUnwrap, extractProv)
+		err = deltaFetchRecursionOld(ctx, incrementFrom, rootFolder, dbDataDirectory, tablespaceSpec, baseFilesToUnwrap,
+			extractProv, deltaRestore)
 		if err != nil {
 			return err
 		}
@@ -102,10 +104,12 @@ func deltaFetchRecursionOld(ctx context.Context, backup Backup, rootFolder stora
 			*(sentinelDto.BackupStartLSN))
 	}
 
-	return backup.unwrapToEmptyDirectory(ctx, dbDataDirectory, filesToUnwrap, false, extractProv)
+	return backup.unwrapToEmptyDirectory(ctx, dbDataDirectory, filesToUnwrap, false, extractProv, deltaRestore)
 }
 
-func GetFetcherOld(dbDataDirectory, fileMask, restoreSpecPath string, extractProv ExtractProvider) internal.Fetcher {
+func GetFetcherOld(dbDataDirectory, fileMask, restoreSpecPath string, extractProv ExtractProvider,
+	options ...FetchOption) internal.Fetcher {
+	fetchOpts := newFetchOptions(options)
 	return func(ctx context.Context, rootFolder storage.Folder, backup internal.Backup) {
 		pgBackup := ToPgBackup(backup)
 		filesToUnwrap, err := pgBackup.GetFilesToUnwrap(ctx, fileMask)
@@ -120,7 +124,17 @@ func GetFetcherOld(dbDataDirectory, fileMask, restoreSpecPath string, extractPro
 			tracelog.ErrorLogger.FatalfOnError(errMessage, err)
 		}
 
-		err = deltaFetchRecursionOld(ctx, pgBackup, rootFolder, utility.ResolveSymlink(dbDataDirectory), spec, filesToUnwrap, extractProv)
+		dataDirectory := utility.ResolveSymlink(dbDataDirectory)
+		deltaRestore := false
+		if fetchOpts.deltaRestore {
+			_, filesMeta, err := pgBackup.GetSentinelAndFilesMetadata(ctx)
+			tracelog.ErrorLogger.FatalfOnError("Failed to fetch backup: %v\n", err)
+
+			filesToUnwrap, deltaRestore, err = prepareDeltaRestore(dataDirectory, filesMeta, filesToUnwrap)
+			tracelog.ErrorLogger.FatalfOnError("Failed to fetch backup: %v\n", err)
+		}
+
+		err = deltaFetchRecursionOld(ctx, pgBackup, rootFolder, dataDirectory, spec, filesToUnwrap, extractProv, deltaRestore)
 		tracelog.ErrorLogger.FatalfOnError("Failed to fetch backup: %v\n", err)
 	}
 }

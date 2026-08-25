@@ -11,8 +11,9 @@ import (
 )
 
 func GetFetcherNew(dbDataDirectory, fileMask, restoreSpecPath string, skipRedundantTars bool,
-	extractProv ExtractProvider,
+	extractProv ExtractProvider, options ...FetchOption,
 ) internal.Fetcher {
+	fetchOpts := newFetchOptions(options)
 	return func(ctx context.Context, rootFolder storage.Folder, backup internal.Backup) {
 		pgBackup := ToPgBackup(backup)
 		filesToUnwrap, err := pgBackup.GetFilesToUnwrap(ctx, fileMask)
@@ -27,16 +28,29 @@ func GetFetcherNew(dbDataDirectory, fileMask, restoreSpecPath string, skipRedund
 			tracelog.ErrorLogger.FatalfOnError(errMessege, err)
 		}
 
-		// directory must be empty before starting a deltaFetch
-		isEmpty, err := utility.IsDirectoryEmpty(dbDataDirectory, nil)
-		tracelog.ErrorLogger.FatalfOnError("Failed to fetch backup: %v\n", err)
+		dataDirectory := utility.ResolveSymlink(dbDataDirectory)
+		deltaRestore := false
+		if fetchOpts.deltaRestore {
+			_, filesMeta, err := pgBackup.GetSentinelAndFilesMetadata(ctx)
+			tracelog.ErrorLogger.FatalfOnError("Failed to fetch backup: %v\n", err)
 
-		if !isEmpty {
-			tracelog.ErrorLogger.FatalfOnError("Failed to fetch backup: %v\n",
-				NewNonEmptyDBDataDirectoryError(dbDataDirectory))
+			filesToUnwrap, deltaRestore, err = prepareDeltaRestore(dataDirectory, filesMeta, filesToUnwrap)
+			tracelog.ErrorLogger.FatalfOnError("Failed to fetch backup: %v\n", err)
+		}
+
+		// A delta restore knows which files it is going to overwrite, everything else needs an
+		// empty directory before starting a deltaFetch
+		if !deltaRestore {
+			isEmpty, err := utility.IsDirectoryEmpty(dbDataDirectory, nil)
+			tracelog.ErrorLogger.FatalfOnError("Failed to fetch backup: %v\n", err)
+
+			if !isEmpty {
+				tracelog.ErrorLogger.FatalfOnError("Failed to fetch backup: %v\n",
+					NewNonEmptyDBDataDirectoryError(dbDataDirectory))
+			}
 		}
 		config := NewFetchConfig(
-			utility.ResolveSymlink(dbDataDirectory),
+			dataDirectory,
 			pgBackup,
 			rootFolder,
 			spec,

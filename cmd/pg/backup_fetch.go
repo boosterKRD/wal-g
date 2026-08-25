@@ -25,6 +25,9 @@ For information about pattern syntax view: https://golang.org/pkg/path/filepath/
 	restoreOnlyDescription        = `[Experimental] Downloads only databases or tables specified by passed names.
 Separate parameters with comma. Use 'database' or 'database/namespace.table' as a parameter ('public' namespace can be omitted).  
 Sets reverse delta unpack & skip redundant tars options automatically. Always downloads system databases and tables.`
+	deltaRestoreDescription = `Restore into a non-empty destination directory, keeping the files that already match the backup.
+Every local file is compared against the checksum stored in the backup and is only fetched when it differs.
+The cluster must be stopped, and the backup must have been taken by a version of WAL-G that stores checksums.`
 )
 
 var fileMask string
@@ -33,6 +36,7 @@ var reverseDeltaUnpack bool
 var skipRedundantTars bool
 var fetchTargetUserData string
 var partialRestoreArgs []string
+var deltaRestore bool
 
 var backupFetchCmd = &cobra.Command{
 	Use:   "backup-fetch destination_directory [backup_name | --target-user-data <data>]",
@@ -76,9 +80,11 @@ var backupFetchCmd = &cobra.Command{
 
 		var pgFetcher internal.Fetcher
 		if reverseDeltaUnpack {
-			pgFetcher = postgres.GetFetcherNew(args[0], fileMask, restoreSpec, skipRedundantTars, extractProv)
+			pgFetcher = postgres.GetFetcherNew(args[0], fileMask, restoreSpec, skipRedundantTars, extractProv,
+				postgres.WithDeltaRestore(deltaRestore))
 		} else {
-			pgFetcher = postgres.GetFetcherOld(args[0], fileMask, restoreSpec, extractProv)
+			pgFetcher = postgres.GetFetcherOld(args[0], fileMask, restoreSpec, extractProv,
+				postgres.WithDeltaRestore(deltaRestore))
 		}
 
 		internal.HandleBackupFetch(cmd.Context(), rootFolder, targetBackupSelector, pgFetcher)
@@ -112,6 +118,8 @@ func init() {
 		"", targetUserDataDescription)
 	backupFetchCmd.Flags().StringSliceVar(&partialRestoreArgs, "restore-only",
 		nil, restoreOnlyDescription)
+	backupFetchCmd.Flags().BoolVar(&deltaRestore, "delta-restore",
+		false, deltaRestoreDescription)
 	backupFetchCmd.Flags().StringVar(&targetStorage, "target-storage",
 		"", targetStorageDescription)
 
