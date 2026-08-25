@@ -4,11 +4,11 @@ set -e -x
 # Delta restore of an incremental backup: the comparison is made once against the metadata of the
 # target backup, and the files that are kept must not be fetched from the base backup either.
 
+. /tmp/tests/test_functions/pg_compat.sh
 . /tmp/tests/test_functions/prepare_config.sh
 prepare_config "/tmp/configs/delta_restore_delta_backup_test_config.json"
 
 initdb ${PGDATA}
-PG_VERSION=$(cat "${PGDATA}/PG_VERSION")
 
 echo "archive_mode = on" >> ${PGDATA}/postgresql.conf
 echo "archive_command = '/usr/bin/timeout 600 wal-g --config=${TMP_CONFIG} wal-push %p'" >> ${PGDATA}/postgresql.conf
@@ -23,7 +23,7 @@ wal-g --config=${TMP_CONFIG} backup-push ${PGDATA}
 
 # Change enough for the next backup to be a real increment on top of the first one.
 pgbench -i -s 10 postgres
-pg_dumpall -f /tmp/dump1
+dump_all /tmp/dump1
 pgbench -c 2 -T 100000000 -S &
 sleep 1
 
@@ -48,21 +48,13 @@ if grep -q "0 files match the backup and are kept" /tmp/delta_restore.log; then
   exit 1
 fi
 
-# https://www.postgresql.org/docs/current/recovery-config.html
-if awk 'BEGIN {exit !('"$PG_VERSION"' >= 12)}'; then
-  touch "$PGDATA/recovery.signal"
-  echo "restore_command = 'echo \"WAL file restoration: %f, %p\"&& wal-g --config=${TMP_CONFIG} wal-fetch \"%f\" \"%p\"'" >> ${PGDATA}/postgresql.conf
-else
-  echo "restore_command = 'echo \"WAL file restoration: %f, %p\"&& wal-g --config=${TMP_CONFIG} wal-fetch \"%f\" \"%p\"'" > ${PGDATA}/recovery.conf
-fi
+echo "restore_command = 'echo \"WAL file restoration: %f, %p\"&& wal-g --config=${TMP_CONFIG} wal-fetch \"%f\" \"%p\"'" | write_recovery_settings
 
 pg_ctl -D ${PGDATA} -w start
 /tmp/scripts/wait_while_pg_not_ready.sh
-pg_dumpall -f /tmp/dump2
+dump_all /tmp/dump2
 
-# PG18 pg_dumpall emits \restrict/\unrestrict with per-invocation random keys
-sed -i '/^\\restrict /d; /^\\unrestrict /d' /tmp/dump1 /tmp/dump2
-diff /tmp/dump1 /tmp/dump2
+compare_dumps /tmp/dump1 /tmp/dump2
 
 psql -f /tmp/scripts/amcheck.sql -v "ON_ERROR_STOP=1" postgres
 

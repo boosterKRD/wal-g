@@ -5,11 +5,11 @@ set -e -x
 # rules. This covers both cases: an empty destination directory, and a backup that carries no file
 # checksums to compare against.
 
+. /tmp/tests/test_functions/pg_compat.sh
 . /tmp/tests/test_functions/prepare_config.sh
 prepare_config "/tmp/configs/delta_restore_fallback_test_config.json"
 
 initdb ${PGDATA}
-PG_VERSION=$(cat "${PGDATA}/PG_VERSION")
 
 echo "archive_mode = on" >> ${PGDATA}/postgresql.conf
 echo "archive_command = '/usr/bin/timeout 600 wal-g --config=${TMP_CONFIG} wal-push %p'" >> ${PGDATA}/postgresql.conf
@@ -20,7 +20,7 @@ pg_ctl -D ${PGDATA} -w start
 wal-g --config=${TMP_CONFIG} st rm / --target=all || true
 
 pgbench -i -s 5 postgres
-pg_dumpall -f /tmp/dump1
+dump_all /tmp/dump1
 pgbench -c 2 -T 100000000 -S &
 sleep 1
 
@@ -41,21 +41,13 @@ if ! grep -q "is empty, doing a regular restore" /tmp/delta_restore_empty.log; t
   exit 1
 fi
 
-# https://www.postgresql.org/docs/current/recovery-config.html
-if awk 'BEGIN {exit !('"$PG_VERSION"' >= 12)}'; then
-  touch "$PGDATA/recovery.signal"
-  echo "restore_command = 'echo \"WAL file restoration: %f, %p\"&& wal-g --config=${TMP_CONFIG} wal-fetch \"%f\" \"%p\"'" >> ${PGDATA}/postgresql.conf
-else
-  echo "restore_command = 'echo \"WAL file restoration: %f, %p\"&& wal-g --config=${TMP_CONFIG} wal-fetch \"%f\" \"%p\"'" > ${PGDATA}/recovery.conf
-fi
+echo "restore_command = 'echo \"WAL file restoration: %f, %p\"&& wal-g --config=${TMP_CONFIG} wal-fetch \"%f\" \"%p\"'" | write_recovery_settings
 
 pg_ctl -D ${PGDATA} -w start
 /tmp/scripts/wait_while_pg_not_ready.sh
-pg_dumpall -f /tmp/dump2
+dump_all /tmp/dump2
 
-# PG18 pg_dumpall emits \restrict/\unrestrict with per-invocation random keys
-sed -i '/^\\restrict /d; /^\\unrestrict /d' /tmp/dump1 /tmp/dump2
-diff /tmp/dump1 /tmp/dump2
+compare_dumps /tmp/dump1 /tmp/dump2
 
 echo "Delta restore into an empty directory success!!!!!!"
 
