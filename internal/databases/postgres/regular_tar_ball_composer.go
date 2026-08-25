@@ -71,6 +71,14 @@ func (maker *RegularTarBallComposerMaker) Make(ctx context.Context, bundle *Bund
 }
 
 func (c *RegularTarBallComposer) AddFile(info *internal.ComposeFileInfo) {
+	// A large file goes into a tarball of its own, so that delta restore can skip or fetch it
+	// without dragging unrelated files along. Incremented files are left out of this: only their
+	// changed pages are stored, so a tarball of their own would usually be a tiny object.
+	if !info.IsIncremented && c.tarBallQueue.IsDedicatedFile(info.Header.Size) {
+		c.addFileToDedicatedTarBall(info)
+		return
+	}
+
 	tarBall, err := c.tarBallQueue.Deque(c.ctx)
 	if err != nil {
 		return
@@ -83,6 +91,27 @@ func (c *RegularTarBallComposer) AddFile(info *internal.ComposeFileInfo) {
 			return err
 		}
 		return c.tarBallQueue.CheckSizeAndEnqueueBack(tarBall)
+	})
+}
+
+// addFileToDedicatedTarBall packs one file into a tarball that holds nothing else. A tarball is
+// still taken out of the fill queue and returned untouched afterwards, so that the number of files
+// being packed at once stays bounded by the queue as before.
+func (c *RegularTarBallComposer) addFileToDedicatedTarBall(info *internal.ComposeFileInfo) {
+	queueSlot, err := c.tarBallQueue.Deque(c.ctx)
+	if err != nil {
+		return
+	}
+	tarBall := c.tarBallQueue.NewDedicatedTarBall()
+	tarBall.SetUp(c.reqCtx, c.crypter)
+	c.tarFileSets.AddFile(tarBall.Name(), info.Header.Name)
+	c.errorGroup.Go(func() error {
+		defer c.tarBallQueue.EnqueueBack(queueSlot)
+		err := c.tarFilePacker.PackFileIntoTar(c.ctx, info, tarBall)
+		if err != nil {
+			return err
+		}
+		return c.tarBallQueue.FinishDedicatedTarBall(tarBall)
 	})
 }
 

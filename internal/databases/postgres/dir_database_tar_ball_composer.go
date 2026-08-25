@@ -33,6 +33,7 @@ func (m DirDatabaseTarBallComposerMaker) Make(ctx context.Context, bundle *Bundl
 		m.tarFileSets,
 		bundle.Crypter,
 		postgresPathFilter,
+		true,
 	), nil
 }
 

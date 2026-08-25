@@ -34,6 +34,9 @@ func (maker *DirDatabaseTarBallComposerMaker) Make(ctx context.Context, bundle *
 		maker.tarFileSets,
 		bundle.Crypter,
 		mongoPathFilter,
+		// Dedicated tarballs for large files exist for PostgreSQL delta restore; leave the layout
+		// of mongo backups as it was.
+		false,
 	), nil
 }
 

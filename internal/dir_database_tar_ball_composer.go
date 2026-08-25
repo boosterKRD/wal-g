@@ -22,7 +22,10 @@ type DirDatabaseTarBallComposer struct {
 	//
 	pathFilter        PathFilter
 	fileDirCollection map[string][]*ComposeFileInfo
-	ctx               context.Context //nolint:containedctx // errgroup root feeds async addListToTar during filepath.Walk
+	// dedicateLargeFiles packs files above the queue threshold into a tarball of their own, so
+	// that delta restore can skip or fetch them without dragging unrelated files along.
+	dedicateLargeFiles bool
+	ctx                context.Context //nolint:containedctx // errgroup root feeds async addListToTar during filepath.Walk
 }
 
 func NewDirDatabaseTarBallComposer(
@@ -33,16 +36,18 @@ func NewDirDatabaseTarBallComposer(
 	sets TarFileSets,
 	crypter crypto.Crypter,
 	pathFilter PathFilter,
+	dedicateLargeFiles bool,
 ) *DirDatabaseTarBallComposer {
 	return &DirDatabaseTarBallComposer{
-		files:             files,
-		tarBallQueue:      tarBallQueue,
-		tarFileSets:       sets,
-		tarBallFilePacker: tarBallFilePacker,
-		fileDirCollection: make(map[string][]*ComposeFileInfo),
-		crypter:           crypter,
-		pathFilter:        pathFilter,
-		ctx:               ctx,
+		files:              files,
+		tarBallQueue:       tarBallQueue,
+		tarFileSets:        sets,
+		tarBallFilePacker:  tarBallFilePacker,
+		fileDirCollection:  make(map[string][]*ComposeFileInfo),
+		crypter:            crypter,
+		pathFilter:         pathFilter,
+		dedicateLargeFiles: dedicateLargeFiles,
+		ctx:                ctx,
 	}
 }
 
@@ -104,6 +109,19 @@ func (d DirDatabaseTarBallComposer) GetFiles() BundleFiles {
 	return d.files
 }
 
+// addFileToDedicatedTarBall packs one file into a tarball that holds nothing else. The caller
+// already holds a tarball dequeued from the fill queue, so the number of files packed at once
+// stays bounded as before.
+func (d DirDatabaseTarBallComposer) addFileToDedicatedTarBall(file *ComposeFileInfo) error {
+	tarBall := d.tarBallQueue.NewDedicatedTarBall()
+	tarBall.SetUp(d.ctx, d.crypter)
+	d.tarFileSets.AddFile(tarBall.Name(), file.Header.Name)
+	if err := d.tarBallFilePacker.PackFileIntoTar(d.ctx, file, tarBall); err != nil {
+		return err
+	}
+	return d.tarBallQueue.FinishDedicatedTarBall(tarBall)
+}
+
 func (d DirDatabaseTarBallComposer) addListToTar(files []*ComposeFileInfo) error {
 	tarBall, err := d.tarBallQueue.Deque(d.ctx)
 	if err != nil {
@@ -112,6 +130,15 @@ func (d DirDatabaseTarBallComposer) addListToTar(files []*ComposeFileInfo) error
 	tarBall.SetUp(d.ctx, d.crypter)
 
 	for _, file := range files {
+		// Incremented files are left out: only their changed pages are stored, so a tarball of
+		// their own would usually be a tiny object.
+		if d.dedicateLargeFiles && !file.IsIncremented && d.tarBallQueue.IsDedicatedFile(file.Header.Size) {
+			if err := d.addFileToDedicatedTarBall(file); err != nil {
+				return err
+			}
+			continue
+		}
+
 		d.tarFileSets.AddFile(tarBall.Name(), file.Header.Name)
 		err := d.tarBallFilePacker.PackFileIntoTar(d.ctx, file, tarBall)
 		if err != nil {

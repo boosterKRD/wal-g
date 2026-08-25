@@ -61,6 +61,7 @@ const (
 	LogLevelSetting               = "WALG_LOG_LEVEL"
 	LogDestinationSetting         = "WALG_LOG_DESTINATION"
 	TarSizeThresholdSetting       = "WALG_TAR_SIZE_THRESHOLD"
+	TarDedicatedFileSizeSetting   = "WALG_TAR_DEDICATED_FILE_SIZE"
 	TarDisableFsyncSetting        = "WALG_TAR_DISABLE_FSYNC"
 	CseKmsIDSetting               = "WALG_CSE_KMS_ID"
 	CseKmsRegionSetting           = "WALG_CSE_KMS_REGION"
@@ -270,6 +271,7 @@ var (
 		CompressionMethodSetting:     "lz4",
 		UseWalDeltaSetting:           "false",
 		TarSizeThresholdSetting:      "1073741823", // (1 << 30) - 1
+		TarDedicatedFileSizeSetting:  "0",          // 0 means half of WALG_TAR_SIZE_THRESHOLD
 		TarDisableFsyncSetting:       "false",
 		TotalBgUploadedLimit:         "32",
 		UseReverseUnpackSetting:      "false",
@@ -379,6 +381,7 @@ var (
 		LogLevelSetting:               true,
 		LogDestinationSetting:         true,
 		TarSizeThresholdSetting:       true,
+		TarDedicatedFileSizeSetting:   true,
 		TarDisableFsyncSetting:        true,
 		"WALG_" + GpgKeyIDSetting:     true,
 		"WALE_" + GpgKeyIDSetting:     true,
