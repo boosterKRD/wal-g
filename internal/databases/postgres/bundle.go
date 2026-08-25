@@ -277,6 +277,14 @@ func (bundle *Bundle) addToBundle(path string, info os.FileInfo) error {
 			// File was not changed since previous backup
 			tracelog.DebugLogger.Println("Skipped due to unchanged modification time: " + path)
 			bundle.TarBallComposer.SkipFile(fileInfoHeader, info)
+			// The file is not read at all here, so it gets no checksum of its own. It has not
+			// changed since the backup it was last copied in, so the checksum recorded there still
+			// describes it, and carrying it over is what lets delta restore keep the file instead
+			// of fetching it again. Backups without checksums carry nothing, as before.
+			if baseFile.Checksum != "" {
+				internal.SetFileChecksum(bundle.TarBallComposer.GetFiles(), fileInfoHeader.Name,
+					baseFile.Size, baseFile.Checksum, baseFile.ChecksumAlgo)
+			}
 			return nil
 		}
 		isIncremented := bundle.isIncremented(path, wasInBase, info)
