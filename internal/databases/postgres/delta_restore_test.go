@@ -158,3 +158,49 @@ func TestRemovePgControl(t *testing.T) {
 	// Removing it again is not an error: an interrupted restore may have taken it already.
 	assert.NoError(t, RemovePgControl(dir))
 }
+
+func TestLogExtraFiles(t *testing.T) {
+	content := []byte("data")
+
+	dir := writePgData(t, map[string][]byte{
+		"PG_VERSION":                      []byte("17\n"),
+		"base/1/16384":                    content,
+		"base/1/leftover":                 content,
+		"pg_wal/000000010000000000000001": content,
+		"pg_stat_tmp/global.stat":         content,
+		"global/pg_control":               content,
+	})
+
+	filesMeta := FilesMetadataDto{Files: internal.BackupFileList{
+		"/PG_VERSION":   describe(t, []byte("17\n")),
+		"/base/1/16384": describe(t, content),
+	}}
+
+	extraCount, err := LogExtraFiles(dir, filesMeta)
+	require.NoError(t, err)
+
+	// Only the leftover file: pg_wal and pg_stat_tmp are never backed up, pg_control is restored
+	// separately, and the other two are part of the backup.
+	assert.Equal(t, 1, extraCount)
+
+	// Nothing is removed yet, the files are only reported.
+
+	for _, name := range []string{
+		"base/1/leftover",
+		"pg_wal/000000010000000000000001",
+		"pg_stat_tmp/global.stat",
+		"global/pg_control",
+	} {
+		_, err := os.Stat(filepath.Join(dir, name))
+		assert.NoError(t, err, "%s must be left in place", name)
+	}
+}
+
+func TestLogExtraFiles_NoMetadata(t *testing.T) {
+	dir := writePgData(t, map[string][]byte{"base/1/16384": []byte("data")})
+
+	// Without file metadata there is nothing to compare against, so nothing is reported.
+	extraCount, err := LogExtraFiles(dir, FilesMetadataDto{})
+	require.NoError(t, err)
+	assert.Zero(t, extraCount)
+}

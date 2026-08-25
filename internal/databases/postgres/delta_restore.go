@@ -123,11 +123,76 @@ func prepareDeltaRestore(dbDataDirectory string, filesMeta FilesMetadataDto,
 		return nil, false, err
 	}
 
+	// Report what is in the directory but not in the backup before anything is written, so that
+	// the list describes the state the operator actually has on disk.
+	if _, err := LogExtraFiles(dbDataDirectory, filesMeta); err != nil {
+		return nil, false, err
+	}
+
 	filesToUnwrap, _, err = SelectFilesToRestore(dbDataDirectory, filesMeta, filesToUnwrap)
 	if err != nil {
 		return nil, false, err
 	}
 	return filesToUnwrap, true, nil
+}
+
+// LogExtraFiles reports the files that are in dbDataDirectory but not in the backup. pgBackRest
+// deletes them at this point, because they are changes the restored cluster diverged by. WAL-G
+// only lists them for now, so that the list can be checked against real clusters before anything
+// is removed automatically.
+//
+// Files under a directory that WAL-G does not back up, pg_wal for instance, are left out, and so
+// are tablespaces, which live outside the data directory behind a symlink.
+// It returns how many files it reported.
+func LogExtraFiles(dbDataDirectory string, filesMeta FilesMetadataDto) (int, error) {
+	if len(filesMeta.Files) == 0 {
+		// Nothing to compare against, every file would look extra.
+		return 0, nil
+	}
+
+	extraCount := 0
+	err := filepath.Walk(dbDataDirectory, func(filePath string, fileInfo os.FileInfo, err error) error {
+		if err != nil {
+			if os.IsNotExist(err) {
+				return nil
+			}
+			return err
+		}
+
+		if _, excluded := ExcludedFilenames[fileInfo.Name()]; excluded {
+			if fileInfo.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		// Only regular files are listed in the backup metadata, so only they can be told apart.
+		if !fileInfo.Mode().IsRegular() {
+			return nil
+		}
+
+		relativePath, err := filepath.Rel(dbDataDirectory, filePath)
+		if err != nil {
+			return err
+		}
+		name := "/" + filepath.ToSlash(relativePath)
+		if _, inBackup := filesMeta.Files[name]; inBackup || UtilityFilePaths[name] {
+			return nil
+		}
+
+		tracelog.InfoLogger.Printf("would remove invalid file '%s'", filePath)
+		extraCount++
+		return nil
+	})
+	if err != nil {
+		return 0, err
+	}
+
+	if extraCount > 0 {
+		tracelog.InfoLogger.Printf(
+			"Delta restore: %d files are not part of the backup and are left in place. "+
+				"They are changes this cluster diverged by, and pgBackRest would have removed them.", extraCount)
+	}
+	return extraCount, nil
 }
 
 func hasChecksums(filesMeta FilesMetadataDto) bool {
