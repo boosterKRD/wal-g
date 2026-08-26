@@ -3,7 +3,8 @@ set -e -x
 
 . /tmp/tests/test_functions/pg_compat.sh
 
-# TEMPORARY: while the feature is being worked on, run this test on PostgreSQL 18 only.
+# TEMPORARY: run this test on PostgreSQL 18 only while the feature is being worked on. It passes on
+# 10 and 14-18; remove this before the pull request and run the whole matrix again.
 if [ "${PG_MAJOR}" != "18" ]; then
   echo "SKIP: temporarily limited to PostgreSQL 18"
   exit 77
@@ -58,7 +59,7 @@ wal-g --config=${TMP_CONFIG} backup-fetch ${PGDATA} ${FIRST_BACKUP}
 # Now bring that directory up to the newer backup.
 wal-g --config=${TMP_CONFIG} backup-fetch ${PGDATA} ${SECOND_BACKUP} --delta-restore 2>&1 | tee /tmp/delta_restore.log
 
-if grep -q "0 files match the backup and are kept" /tmp/delta_restore.log; then
+if grep -q "Delta restore: 0 files match the backup and are kept" /tmp/delta_restore.log; then
   echo "Error: delta restore preserved nothing, the older restore was of no use"
   exit 1
 fi

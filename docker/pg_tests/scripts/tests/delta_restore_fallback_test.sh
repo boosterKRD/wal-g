@@ -7,7 +7,8 @@ set -e -x
 
 . /tmp/tests/test_functions/pg_compat.sh
 
-# TEMPORARY: while the feature is being worked on, run this test on PostgreSQL 18 only.
+# TEMPORARY: run this test on PostgreSQL 18 only while the feature is being worked on. It passes on
+# 10 and 14-18; remove this before the pull request and run the whole matrix again.
 if [ "${PG_MAJOR}" != "18" ]; then
   echo "SKIP: temporarily limited to PostgreSQL 18"
   exit 77
