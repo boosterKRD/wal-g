@@ -360,6 +360,9 @@ func SelectFilesToRestore(dbDataDirectory string, filesMeta FilesMetadataDto,
 			defer waitGroup.Done()
 			for name := range work {
 				preserve := matchesBackup(dbDataDirectory, name, filesMeta.Files[name])
+				if !preserve {
+					removeStaleLocalFile(dbDataDirectory, name)
+				}
 
 				mutex.Lock()
 				if preserve {
@@ -383,6 +386,31 @@ func SelectFilesToRestore(dbDataDirectory string, filesMeta FilesMetadataDto,
 		stats.Preserved, stats.PreservedBytes, stats.Restored)
 
 	return result, stats, nil
+}
+
+// removeStaleLocalFile drops the local copy of a file that is about to be restored, so that the
+// restore writes it from scratch.
+//
+// Without this, the reverse unpack implementation takes the file for one it may reuse: it calls
+// RestoreMissingPages, which fills in the pages the local copy is missing and leaves the pages it
+// already has alone. Those are exactly the stale pages the checksum said not to trust. The other
+// implementation opens the file with O_TRUNC and does not have the problem, but it costs nothing
+// to make both start from the same place.
+//
+// Only regular files of the backup are removed. Directories are recreated in place, and whatever
+// the walk in RemoveExtraFiles left alone is left alone here too.
+func removeStaleLocalFile(dbDataDirectory, name string) {
+	filePath := path.Join(dbDataDirectory, name)
+
+	// Directories are recreated in place and links are left to the restore, so only regular files
+	// are removed here. A file that is not there needs no removing either.
+	fileInfo, err := os.Lstat(filePath)
+	if err != nil || !fileInfo.Mode().IsRegular() {
+		return
+	}
+	if err := os.Remove(filePath); err != nil {
+		tracelog.WarningLogger.Printf("Failed to remove '%s' before restoring it: %v", filePath, err)
+	}
 }
 
 // matchesBackup tells whether the local copy of a file can be kept as it is.
