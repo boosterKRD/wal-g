@@ -141,8 +141,7 @@ func prepareDeltaRestore(dbDataDirectory string, filesMeta FilesMetadataDto,
 // only lists them for now, so that the list can be checked against real clusters before anything
 // is removed automatically.
 //
-// Files under a directory that WAL-G does not back up, pg_wal for instance, are left out, and so
-// are tablespaces, which live outside the data directory behind a symlink.
+// Files under a directory that WAL-G does not back up, pg_wal for instance, are left out.
 // It returns how many files it reported.
 func LogExtraFiles(dbDataDirectory string, filesMeta FilesMetadataDto) (int, error) {
 	if len(filesMeta.Files) == 0 {
@@ -150,8 +149,31 @@ func LogExtraFiles(dbDataDirectory string, filesMeta FilesMetadataDto) (int, err
 		return 0, nil
 	}
 
+	extraCount, err := logExtraFilesUnder(dbDataDirectory, "", filesMeta)
+	if err != nil {
+		return 0, err
+	}
+
+	tablespaceExtraCount, err := logExtraFilesInTablespaces(dbDataDirectory, filesMeta)
+	if err != nil {
+		return 0, err
+	}
+	extraCount += tablespaceExtraCount
+
+	if extraCount > 0 {
+		tracelog.InfoLogger.Printf(
+			"Delta restore: %d files are not part of the backup and are left in place. "+
+				"They are changes this cluster diverged by, and pgBackRest would have removed them.", extraCount)
+	}
+	return extraCount, nil
+}
+
+// logExtraFilesUnder walks one directory tree and reports the files the backup does not have.
+// namePrefix is what the paths under root are called in the backup metadata: empty for the data
+// directory itself, and /pg_tblspc/<link> for a tablespace.
+func logExtraFilesUnder(root, namePrefix string, filesMeta FilesMetadataDto) (int, error) {
 	extraCount := 0
-	err := filepath.Walk(dbDataDirectory, func(filePath string, fileInfo os.FileInfo, err error) error {
+	err := filepath.Walk(root, func(filePath string, fileInfo os.FileInfo, err error) error {
 		if err != nil {
 			if os.IsNotExist(err) {
 				return nil
@@ -170,11 +192,11 @@ func LogExtraFiles(dbDataDirectory string, filesMeta FilesMetadataDto) (int, err
 			return nil
 		}
 
-		relativePath, err := filepath.Rel(dbDataDirectory, filePath)
+		relativePath, err := filepath.Rel(root, filePath)
 		if err != nil {
 			return err
 		}
-		name := "/" + filepath.ToSlash(relativePath)
+		name := namePrefix + "/" + filepath.ToSlash(relativePath)
 		if _, inBackup := filesMeta.Files[name]; inBackup || UtilityFilePaths[name] {
 			return nil
 		}
@@ -183,14 +205,40 @@ func LogExtraFiles(dbDataDirectory string, filesMeta FilesMetadataDto) (int, err
 		extraCount++
 		return nil
 	})
+	return extraCount, err
+}
+
+// logExtraFilesInTablespaces does the same for the tablespaces of the cluster. They live outside
+// the data directory, reachable only through the symlinks in pg_tblspc, and filepath.Walk does not
+// follow symlinks. The symlinks of the directory being restored into are followed rather than the
+// locations recorded in the backup, because the question is what is on disk right now.
+func logExtraFilesInTablespaces(dbDataDirectory string, filesMeta FilesMetadataDto) (int, error) {
+	tablespaceRoot := filepath.Join(dbDataDirectory, TablespaceFolder)
+	entries, err := os.ReadDir(tablespaceRoot)
 	if err != nil {
+		if os.IsNotExist(err) {
+			return 0, nil
+		}
 		return 0, err
 	}
 
-	if extraCount > 0 {
-		tracelog.InfoLogger.Printf(
-			"Delta restore: %d files are not part of the backup and are left in place. "+
-				"They are changes this cluster diverged by, and pgBackRest would have removed them.", extraCount)
+	extraCount := 0
+	for _, entry := range entries {
+		if entry.Type()&os.ModeSymlink == 0 {
+			continue
+		}
+
+		location, err := os.Readlink(filepath.Join(tablespaceRoot, entry.Name()))
+		if err != nil {
+			tracelog.WarningLogger.Printf("Failed to read the tablespace symlink '%s': %v", entry.Name(), err)
+			continue
+		}
+
+		count, err := logExtraFilesUnder(location, "/"+TablespaceFolder+"/"+entry.Name(), filesMeta)
+		if err != nil {
+			return 0, err
+		}
+		extraCount += count
 	}
 	return extraCount, nil
 }

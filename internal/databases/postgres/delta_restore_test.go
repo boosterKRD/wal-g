@@ -204,3 +204,47 @@ func TestLogExtraFiles_NoMetadata(t *testing.T) {
 	require.NoError(t, err)
 	assert.Zero(t, extraCount)
 }
+
+// Tablespaces live outside the data directory, reachable only through the symlinks in pg_tblspc,
+// so they need a walk of their own.
+func TestLogExtraFiles_WalksTablespaces(t *testing.T) {
+	content := []byte("data")
+
+	dir := writePgData(t, map[string][]byte{
+		"PG_VERSION": []byte("17\n"),
+	})
+
+	// A tablespace: a directory somewhere else, and a symlink to it under pg_tblspc.
+	tablespaceDir := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(tablespaceDir, "PG_17_202406281", "16384"), 0o700))
+	require.NoError(t, os.WriteFile(filepath.Join(tablespaceDir, "PG_17_202406281", "16384", "1259"), content, 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(tablespaceDir, "PG_17_202406281", "16384", "leftover"), content, 0o600))
+
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, TablespaceFolder), 0o700))
+	require.NoError(t, os.Symlink(tablespaceDir, filepath.Join(dir, TablespaceFolder, "16385")))
+
+	filesMeta := FilesMetadataDto{Files: internal.BackupFileList{
+		"/PG_VERSION": describe(t, []byte("17\n")),
+		"/" + TablespaceFolder + "/16385/PG_17_202406281/16384/1259": describe(t, content),
+	}}
+
+	extraCount, err := LogExtraFiles(dir, filesMeta)
+	require.NoError(t, err)
+
+	// Only the leftover inside the tablespace.
+	assert.Equal(t, 1, extraCount)
+}
+
+func TestLogExtraFiles_BrokenTablespaceSymlink(t *testing.T) {
+	dir := writePgData(t, map[string][]byte{"PG_VERSION": []byte("17\n")})
+
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, TablespaceFolder), 0o700))
+	require.NoError(t, os.Symlink(filepath.Join(t.TempDir(), "gone"), filepath.Join(dir, TablespaceFolder, "16385")))
+
+	filesMeta := FilesMetadataDto{Files: internal.BackupFileList{"/PG_VERSION": describe(t, []byte("17\n"))}}
+
+	// A symlink to a directory that is not there is not an error: nothing to report.
+	extraCount, err := LogExtraFiles(dir, filesMeta)
+	require.NoError(t, err)
+	assert.Zero(t, extraCount)
+}
