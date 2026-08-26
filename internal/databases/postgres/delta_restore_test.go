@@ -1,6 +1,7 @@
 package postgres
 
 import (
+	"net"
 	"os"
 	"path/filepath"
 	"testing"
@@ -159,16 +160,76 @@ func TestRemovePgControl(t *testing.T) {
 	assert.NoError(t, RemovePgControl(dir))
 }
 
-func TestLogExtraFiles(t *testing.T) {
+func TestRemoveExtraFiles(t *testing.T) {
 	content := []byte("data")
 
 	dir := writePgData(t, map[string][]byte{
 		"PG_VERSION":                      []byte("17\n"),
 		"base/1/16384":                    content,
 		"base/1/leftover":                 content,
+		"base/9999/16384":                 content,
 		"pg_wal/000000010000000000000001": content,
 		"pg_stat_tmp/global.stat":         content,
+		"pg_stat/global.stat":             content,
 		"global/pg_control":               content,
+	})
+	// An empty directory the backup does not have, and one it does.
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "leftover_dir", "nested"), 0o700))
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "pg_twophase"), 0o700))
+	// A symlink and a socket, neither of which belongs in a data directory.
+	require.NoError(t, os.Symlink(filepath.Join(dir, "PG_VERSION"), filepath.Join(dir, "leftover_link")))
+	listener, err := net.Listen("unix", filepath.Join(dir, "s.PGSQL.5432"))
+	require.NoError(t, err)
+	defer listener.Close()
+
+	filesMeta := FilesMetadataDto{Files: internal.BackupFileList{
+		"/PG_VERSION":   describe(t, []byte("17\n")),
+		"/base/1/16384": describe(t, content),
+		"/pg_twophase":  describe(t, nil),
+	}}
+
+	removedCount, err := RemoveExtraFiles(dir, filesMeta)
+	require.NoError(t, err)
+
+	// base/1/leftover, base/9999 as a whole, pg_stat/global.stat, leftover_dir as a whole,
+	// leftover_link and the socket.
+	assert.Equal(t, 6, removedCount)
+
+	for _, name := range []string{
+		"base/1/leftover",
+		"base/9999",
+		"pg_stat/global.stat",
+		"leftover_dir",
+		"leftover_link",
+		"s.PGSQL.5432",
+	} {
+		_, err := os.Lstat(filepath.Join(dir, name))
+		assert.True(t, os.IsNotExist(err), "%s must have been removed", name)
+	}
+
+	for _, name := range []string{
+		"PG_VERSION",
+		"base/1/16384",
+		"pg_twophase",
+		// Never backed up, so the backup cannot put them back either.
+		"pg_wal/000000010000000000000001",
+		"pg_stat_tmp/global.stat",
+		// Restored separately, at the very end.
+		"global/pg_control",
+	} {
+		_, err := os.Lstat(filepath.Join(dir, name))
+		assert.NoError(t, err, "%s must be left in place", name)
+	}
+}
+
+// A directory of the backup that has no entry of its own must survive on the strength of the files
+// underneath it, or one missing entry would cost the whole subtree.
+func TestRemoveExtraFiles_KeepsDirectoriesHoldingBackupFiles(t *testing.T) {
+	content := []byte("data")
+
+	dir := writePgData(t, map[string][]byte{
+		"PG_VERSION":   []byte("17\n"),
+		"base/1/16384": content,
 	})
 
 	filesMeta := FilesMetadataDto{Files: internal.BackupFileList{
@@ -176,38 +237,29 @@ func TestLogExtraFiles(t *testing.T) {
 		"/base/1/16384": describe(t, content),
 	}}
 
-	extraCount, err := LogExtraFiles(dir, filesMeta)
+	removedCount, err := RemoveExtraFiles(dir, filesMeta)
 	require.NoError(t, err)
+	assert.Zero(t, removedCount)
 
-	// Only the leftover file: pg_wal and pg_stat_tmp are never backed up, pg_control is restored
-	// separately, and the other two are part of the backup.
-	assert.Equal(t, 1, extraCount)
-
-	// Nothing is removed yet, the files are only reported.
-
-	for _, name := range []string{
-		"base/1/leftover",
-		"pg_wal/000000010000000000000001",
-		"pg_stat_tmp/global.stat",
-		"global/pg_control",
-	} {
-		_, err := os.Stat(filepath.Join(dir, name))
-		assert.NoError(t, err, "%s must be left in place", name)
-	}
+	_, err = os.Stat(filepath.Join(dir, "base", "1", "16384"))
+	assert.NoError(t, err)
 }
 
-func TestLogExtraFiles_NoMetadata(t *testing.T) {
+func TestRemoveExtraFiles_NoMetadata(t *testing.T) {
 	dir := writePgData(t, map[string][]byte{"base/1/16384": []byte("data")})
 
-	// Without file metadata there is nothing to compare against, so nothing is reported.
-	extraCount, err := LogExtraFiles(dir, FilesMetadataDto{})
+	// Without file metadata there is nothing to compare against, so nothing is removed.
+	removedCount, err := RemoveExtraFiles(dir, FilesMetadataDto{})
 	require.NoError(t, err)
-	assert.Zero(t, extraCount)
+	assert.Zero(t, removedCount)
+
+	_, err = os.Stat(filepath.Join(dir, "base", "1", "16384"))
+	assert.NoError(t, err)
 }
 
 // Tablespaces live outside the data directory, reachable only through the symlinks in pg_tblspc,
 // so they need a walk of their own.
-func TestLogExtraFiles_WalksTablespaces(t *testing.T) {
+func TestRemoveExtraFiles_WalksTablespaces(t *testing.T) {
 	content := []byte("data")
 
 	dir := writePgData(t, map[string][]byte{
@@ -228,23 +280,55 @@ func TestLogExtraFiles_WalksTablespaces(t *testing.T) {
 		"/" + TablespaceFolder + "/16385/PG_17_202406281/16384/1259": describe(t, content),
 	}}
 
-	extraCount, err := LogExtraFiles(dir, filesMeta)
+	removedCount, err := RemoveExtraFiles(dir, filesMeta)
 	require.NoError(t, err)
 
 	// Only the leftover inside the tablespace.
-	assert.Equal(t, 1, extraCount)
+	assert.Equal(t, 1, removedCount)
+
+	_, err = os.Stat(filepath.Join(tablespaceDir, "PG_17_202406281", "16384", "leftover"))
+	assert.True(t, os.IsNotExist(err))
+	_, err = os.Stat(filepath.Join(tablespaceDir, "PG_17_202406281", "16384", "1259"))
+	assert.NoError(t, err)
 }
 
-func TestLogExtraFiles_BrokenTablespaceSymlink(t *testing.T) {
+// The symlinks in pg_tblspc are not in the file metadata: the backup keeps the tablespaces in its
+// tablespace spec and recreates the symlinks from there. Removing one would leave the restored
+// cluster without its tablespace.
+func TestRemoveExtraFiles_KeepsTablespaceSymlinks(t *testing.T) {
+	dir := writePgData(t, map[string][]byte{"PG_VERSION": []byte("17\n")})
+
+	tablespaceDir := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, TablespaceFolder), 0o700))
+	symlinkPath := filepath.Join(dir, TablespaceFolder, "16385")
+	require.NoError(t, os.Symlink(tablespaceDir, symlinkPath))
+
+	filesMeta := FilesMetadataDto{Files: internal.BackupFileList{
+		"/PG_VERSION":          describe(t, []byte("17\n")),
+		"/" + TablespaceFolder: describe(t, nil),
+	}}
+
+	removedCount, err := RemoveExtraFiles(dir, filesMeta)
+	require.NoError(t, err)
+	assert.Zero(t, removedCount)
+
+	_, err = os.Lstat(symlinkPath)
+	assert.NoError(t, err)
+}
+
+func TestRemoveExtraFiles_BrokenTablespaceSymlink(t *testing.T) {
 	dir := writePgData(t, map[string][]byte{"PG_VERSION": []byte("17\n")})
 
 	require.NoError(t, os.MkdirAll(filepath.Join(dir, TablespaceFolder), 0o700))
 	require.NoError(t, os.Symlink(filepath.Join(t.TempDir(), "gone"), filepath.Join(dir, TablespaceFolder, "16385")))
 
-	filesMeta := FilesMetadataDto{Files: internal.BackupFileList{"/PG_VERSION": describe(t, []byte("17\n"))}}
+	filesMeta := FilesMetadataDto{Files: internal.BackupFileList{
+		"/PG_VERSION":          describe(t, []byte("17\n")),
+		"/" + TablespaceFolder: describe(t, nil),
+	}}
 
-	// A symlink to a directory that is not there is not an error: nothing to report.
-	extraCount, err := LogExtraFiles(dir, filesMeta)
+	// A symlink to a directory that is not there is not an error: nothing to remove.
+	removedCount, err := RemoveExtraFiles(dir, filesMeta)
 	require.NoError(t, err)
-	assert.Zero(t, extraCount)
+	assert.Zero(t, removedCount)
 }

@@ -5,6 +5,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"strings"
 	"sync"
 
 	"github.com/pkg/errors"
@@ -123,9 +124,10 @@ func prepareDeltaRestore(dbDataDirectory string, filesMeta FilesMetadataDto,
 		return nil, false, err
 	}
 
-	// Report what is in the directory but not in the backup before anything is written, so that
-	// the list describes the state the operator actually has on disk.
-	if _, err := LogExtraFiles(dbDataDirectory, filesMeta); err != nil {
+	// Remove what is in the directory but not in the backup before anything is written. Doing it
+	// first means the restore cannot delete a file it has just put in place, and the files removed
+	// here do not have to be checksummed below.
+	if _, err := RemoveExtraFiles(dbDataDirectory, filesMeta); err != nil {
 		return nil, false, err
 	}
 
@@ -136,43 +138,47 @@ func prepareDeltaRestore(dbDataDirectory string, filesMeta FilesMetadataDto,
 	return filesToUnwrap, true, nil
 }
 
-// LogExtraFiles reports the files that are in dbDataDirectory but not in the backup. pgBackRest
-// deletes them at this point, because they are changes the restored cluster diverged by. WAL-G
-// only lists them for now, so that the list can be checked against real clusters before anything
-// is removed automatically.
+// RemoveExtraFiles deletes everything in dbDataDirectory that the backup does not have. Those are
+// the changes the cluster on disk diverged by, and leaving them behind would make the restored
+// cluster a mixture of two different points in time. pgBackRest removes them at this point too.
 //
-// Files under a directory that WAL-G does not back up, pg_wal for instance, are left out.
-// It returns how many files it reported.
-func LogExtraFiles(dbDataDirectory string, filesMeta FilesMetadataDto) (int, error) {
+// It runs before anything is written, so it can never delete a file the restore has just put in
+// place. Directories WAL-G does not back up, pg_wal for instance, are left alone entirely: their
+// contents were never copied, so the backup cannot bring them back.
+// It returns how many entries it removed.
+func RemoveExtraFiles(dbDataDirectory string, filesMeta FilesMetadataDto) (int, error) {
 	if len(filesMeta.Files) == 0 {
 		// Nothing to compare against, every file would look extra.
 		return 0, nil
 	}
 
-	extraCount, err := logExtraFilesUnder(dbDataDirectory, "", filesMeta)
+	backupDirs := backupDirectories(filesMeta)
+
+	removedCount, err := removeExtraFilesUnder(dbDataDirectory, "", filesMeta, backupDirs)
 	if err != nil {
 		return 0, err
 	}
 
-	tablespaceExtraCount, err := logExtraFilesInTablespaces(dbDataDirectory, filesMeta)
+	tablespaceRemovedCount, err := removeExtraFilesInTablespaces(dbDataDirectory, filesMeta, backupDirs)
 	if err != nil {
 		return 0, err
 	}
-	extraCount += tablespaceExtraCount
+	removedCount += tablespaceRemovedCount
 
-	if extraCount > 0 {
+	if removedCount > 0 {
 		tracelog.InfoLogger.Printf(
-			"Delta restore: %d files are not part of the backup and are left in place. "+
-				"They are changes this cluster diverged by, and pgBackRest would have removed them.", extraCount)
+			"Delta restore: %d files and directories were not part of the backup and have been removed.",
+			removedCount)
 	}
-	return extraCount, nil
+	return removedCount, nil
 }
 
-// logExtraFilesUnder walks one directory tree and reports the files the backup does not have.
+// removeExtraFilesUnder walks one directory tree and removes what the backup does not have.
 // namePrefix is what the paths under root are called in the backup metadata: empty for the data
 // directory itself, and /pg_tblspc/<link> for a tablespace.
-func logExtraFilesUnder(root, namePrefix string, filesMeta FilesMetadataDto) (int, error) {
-	extraCount := 0
+func removeExtraFilesUnder(root, namePrefix string, filesMeta FilesMetadataDto,
+	backupDirs map[string]bool) (int, error) {
+	removedCount := 0
 	err := filepath.Walk(root, func(filePath string, fileInfo os.FileInfo, err error) error {
 		if err != nil {
 			if os.IsNotExist(err) {
@@ -181,38 +187,78 @@ func logExtraFilesUnder(root, namePrefix string, filesMeta FilesMetadataDto) (in
 			return err
 		}
 
+		relativePath, err := filepath.Rel(root, filePath)
+		if err != nil {
+			return err
+		}
+		if relativePath == "." {
+			// The root of the walk itself, which is the thing being restored into.
+			return nil
+		}
+		// filepath.Walk does not follow symlinks, so it cannot wander outside root on its own.
+		// The check is here so that a future change cannot turn this into a walk that deletes
+		// somebody else's files.
+		if !isUnder(root, filePath) {
+			return errors.Errorf("delta restore: refusing to remove '%s', it is outside '%s'", filePath, root)
+		}
+
 		if _, excluded := ExcludedFilenames[fileInfo.Name()]; excluded {
+			// An excluded directory is in the backup, but empty: its contents were never copied.
+			// Removing them would destroy data the restore cannot put back.
 			if fileInfo.IsDir() {
 				return filepath.SkipDir
 			}
 			return nil
 		}
-		// Only regular files are listed in the backup metadata, so only they can be told apart.
-		if !fileInfo.Mode().IsRegular() {
+
+		name := namePrefix + "/" + filepath.ToSlash(relativePath)
+
+		// The symlinks in pg_tblspc are not in the metadata. The backup keeps the tablespaces in
+		// its tablespace spec instead and recreates the symlinks from there, so one missing from
+		// filesMeta.Files says nothing about whether it belongs.
+		if fileInfo.Mode()&os.ModeSymlink != 0 && path.Dir(name) == "/"+TablespaceFolder {
 			return nil
 		}
 
-		relativePath, err := filepath.Rel(root, filePath)
-		if err != nil {
-			return err
-		}
-		name := namePrefix + "/" + filepath.ToSlash(relativePath)
 		if _, inBackup := filesMeta.Files[name]; inBackup || UtilityFilePaths[name] {
 			return nil
 		}
 
-		tracelog.InfoLogger.Printf("would remove invalid file '%s'", filePath)
-		extraCount++
+		if fileInfo.IsDir() {
+			if backupDirs[name] {
+				// The backup has files under this directory even though the directory itself has
+				// no entry of its own. Removing it would take them along.
+				return nil
+			}
+			// Removing the directory takes everything inside it along, so the walk must not
+			// descend into what is no longer there.
+			if err := os.RemoveAll(filePath); err != nil {
+				return errors.Wrapf(err, "delta restore: failed to remove directory '%s'", filePath)
+			}
+			tracelog.InfoLogger.Printf("remove invalid directory '%s'", filePath)
+			removedCount++
+			return filepath.SkipDir
+		}
+
+		// Everything else goes the same way: regular files, symlinks, and the sockets and fifos a
+		// data directory should not contain at all. os.Remove drops a symlink itself rather than
+		// what it points at.
+		if err := os.Remove(filePath); err != nil {
+			return errors.Wrapf(err, "delta restore: failed to remove '%s'", filePath)
+		}
+		tracelog.InfoLogger.Printf("remove invalid file '%s'", filePath)
+		removedCount++
 		return nil
 	})
-	return extraCount, err
+	return removedCount, err
 }
 
-// logExtraFilesInTablespaces does the same for the tablespaces of the cluster. They live outside
+// removeExtraFilesInTablespaces does the same for the tablespaces of the cluster. They live outside
 // the data directory, reachable only through the symlinks in pg_tblspc, and filepath.Walk does not
 // follow symlinks. The symlinks of the directory being restored into are followed rather than the
 // locations recorded in the backup, because the question is what is on disk right now.
-func logExtraFilesInTablespaces(dbDataDirectory string, filesMeta FilesMetadataDto) (int, error) {
+func removeExtraFilesInTablespaces(dbDataDirectory string, filesMeta FilesMetadataDto,
+	backupDirs map[string]bool) (int, error) {
 	tablespaceRoot := filepath.Join(dbDataDirectory, TablespaceFolder)
 	entries, err := os.ReadDir(tablespaceRoot)
 	if err != nil {
@@ -222,7 +268,7 @@ func logExtraFilesInTablespaces(dbDataDirectory string, filesMeta FilesMetadataD
 		return 0, err
 	}
 
-	extraCount := 0
+	removedCount := 0
 	for _, entry := range entries {
 		if entry.Type()&os.ModeSymlink == 0 {
 			continue
@@ -234,13 +280,47 @@ func logExtraFilesInTablespaces(dbDataDirectory string, filesMeta FilesMetadataD
 			continue
 		}
 
-		count, err := logExtraFilesUnder(location, "/"+TablespaceFolder+"/"+entry.Name(), filesMeta)
+		count, err := removeExtraFilesUnder(location, "/"+TablespaceFolder+"/"+entry.Name(), filesMeta, backupDirs)
 		if err != nil {
 			return 0, err
 		}
-		extraCount += count
+		removedCount += count
 	}
-	return extraCount, nil
+	return removedCount, nil
+}
+
+// backupDirectories collects every directory that has something of the backup under it. Backups do
+// carry an entry for each directory of their own, but relying on that alone would mean a single
+// missing entry costs the whole subtree underneath it. A directory is only removed when the backup
+// has nothing in it at all.
+func backupDirectories(filesMeta FilesMetadataDto) map[string]bool {
+	backupDirs := make(map[string]bool)
+
+	addAncestors := func(name string) {
+		for dir := path.Dir(name); dir != "/" && dir != "." && !backupDirs[dir]; dir = path.Dir(dir) {
+			backupDirs[dir] = true
+		}
+	}
+
+	for name := range filesMeta.Files {
+		addAncestors(name)
+	}
+	// pg_control and the label files are restored separately and are not in filesMeta.Files, but
+	// the directories holding them are as much a part of the backup as any other.
+	for name := range UtilityFilePaths {
+		addAncestors(name)
+	}
+	return backupDirs
+}
+
+// isUnder reports whether filePath is inside root. Both are expected to come from the same walk,
+// so neither is resolved any further.
+func isUnder(root, filePath string) bool {
+	relativePath, err := filepath.Rel(root, filePath)
+	if err != nil {
+		return false
+	}
+	return relativePath != ".." && !strings.HasPrefix(relativePath, ".."+string(filepath.Separator))
 }
 
 func hasChecksums(filesMeta FilesMetadataDto) bool {

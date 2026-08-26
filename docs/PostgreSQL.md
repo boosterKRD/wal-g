@@ -187,13 +187,16 @@ The cluster must be stopped: WAL-G refuses to run if `postmaster.pid` is present
 
 How much this saves depends on how the changed files are spread across backup bundles: a bundle is downloaded only if at least one of the files in it has to be restored, and its download is cut short once the last needed file has been read out of it. Large files get a bundle of their own (see `WALG_TAR_DEDICATED_FILE_SIZE`), so for a database with big tables the saving is close to the share of unchanged data.
 
-Files that are in the destination directory but not in the backup are **reported and left in place**:
+Anything in the destination directory that is not in the backup is **removed** before the restore starts:
 
 ```
-INFO: would remove invalid file '/var/lib/postgresql/17/main/base/1/leftover'
+INFO: remove invalid file '/var/lib/postgresql/17/main/base/1/leftover'
+INFO: remove invalid directory '/var/lib/postgresql/17/main/base/9999'
 ```
 
-These are changes the local cluster diverged by. Unlike pgBackRest, WAL-G does not remove them yet, so a restored cluster may still hold data that was not in the backup. Files under directories WAL-G never backs up, `pg_wal` for instance, are not reported, and neither is anything inside tablespaces.
+These are the changes the local cluster diverged by, and leaving them behind would make the restored cluster a mixture of two different points in time. Directories are removed with everything inside them, and so are symlinks, sockets and any other object a data directory should not contain. Tablespaces are cleaned as well, through the symlinks in `pg_tblspc`.
+
+Left alone are the directories WAL-G never backs up, `pg_wal`, `pg_replslot` and `pg_notify` among them: their contents were never copied, so the restore could not put them back. The symlinks in `pg_tblspc` are kept too, because the backup recreates them from its tablespace spec rather than from the file list.
 
 #### Partial restore (experimental)
 
