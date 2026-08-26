@@ -46,6 +46,10 @@ for FILE in $(find ${PGDATA}/base -type f -size +8k | head -3); do
   dd if=/dev/urandom of="${FILE}" bs=8192 count=1 conv=notrunc
 done
 echo "this file is not part of the backup" > ${PGDATA}/leftover_file
+# A whole directory that is not in the backup, and a symlink that is not either.
+mkdir -p ${PGDATA}/leftover_dir/nested
+echo "nor is this one" > ${PGDATA}/leftover_dir/nested/leftover_nested_file
+ln -s ${PGDATA}/PG_VERSION ${PGDATA}/leftover_link
 # The same inside the tablespace, which lives outside the data directory behind a symlink.
 TABLESPACE_LINK=$(find ${PGDATA}/pg_tblspc -type l | head -1)
 echo "this file is not part of the backup either" > "${TABLESPACE_LINK}/leftover_in_tablespace"
@@ -62,14 +66,37 @@ if grep -q "Delta restore: 0 files match the backup and are kept" /tmp/delta_res
   exit 1
 fi
 
-# The files that are not in the backup must have been reported, in the data directory and inside
-# the tablespace alike.
-if ! grep -q "would remove invalid file .*leftover_file" /tmp/delta_restore.log; then
+# Everything that is not in the backup must be gone, in the data directory and inside the
+# tablespace alike, whatever kind of object it was.
+if ! grep -q "remove invalid file .*leftover_file" /tmp/delta_restore.log; then
   echo "Error: delta restore did not report the file that is not part of the backup"
   exit 1
 fi
-if ! grep -q "would remove invalid file .*leftover_in_tablespace" /tmp/delta_restore.log; then
+if ! grep -q "remove invalid directory .*leftover_dir" /tmp/delta_restore.log; then
+  echo "Error: delta restore did not report the directory that is not part of the backup"
+  exit 1
+fi
+if ! grep -q "remove invalid file .*leftover_link" /tmp/delta_restore.log; then
+  echo "Error: delta restore did not report the symlink that is not part of the backup"
+  exit 1
+fi
+if ! grep -q "remove invalid file .*leftover_in_tablespace" /tmp/delta_restore.log; then
   echo "Error: delta restore did not look inside the tablespace for files that are not in the backup"
+  exit 1
+fi
+
+for LEFTOVER in ${PGDATA}/leftover_file ${PGDATA}/leftover_dir ${PGDATA}/leftover_link \
+                "${TABLESPACE_LINK}/leftover_in_tablespace"; do
+  if [ -e "${LEFTOVER}" ] || [ -L "${LEFTOVER}" ]; then
+    echo "Error: ${LEFTOVER} is not part of the backup but is still there after delta restore"
+    exit 1
+  fi
+done
+
+# The tablespace symlinks are not in the file metadata, they are recreated from the tablespace
+# spec. Removing one would leave the cluster without its tablespace.
+if [ ! -L "${TABLESPACE_LINK}" ]; then
+  echo "Error: delta restore removed the tablespace symlink ${TABLESPACE_LINK}"
   exit 1
 fi
 
