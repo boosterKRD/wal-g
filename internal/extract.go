@@ -3,6 +3,7 @@ package internal
 import (
 	"archive/tar"
 	"context"
+	stderrors "errors"
 	"fmt"
 	"io"
 	"strings"
@@ -20,6 +21,20 @@ import (
 
 var MinExtractRetryWait = time.Minute
 var MaxExtractRetryWait = 5 * time.Minute
+
+// UnretryableExtractionError is implemented by errors that say something about the backup itself
+// rather than about the way it was read. Downloading the same tarball again would produce the same
+// error, so extraction gives up on the first one instead of working through its retries.
+type UnretryableExtractionError interface {
+	error
+	UnretryableExtraction()
+}
+
+// IsUnretryableExtractionError looks for such an error anywhere in the chain.
+func IsUnretryableExtractionError(err error) bool {
+	var unretryable UnretryableExtractionError
+	return stderrors.As(err, &unretryable)
+}
 
 type NoFilesToExtractError struct {
 	error
@@ -208,7 +223,10 @@ func ExtractAllWithSleeper(ctx context.Context, tarInterpreter TarInterpreter, f
 	retries := conf.GetFetchRetries()
 
 	for currentRun := files; len(currentRun) > 0; {
-		failed := tryExtractFiles(ctx, currentRun, tarInterpreter, downloadingConcurrency)
+		failed, unretryableErr := tryExtractFiles(ctx, currentRun, tarInterpreter, downloadingConcurrency)
+		if unretryableErr != nil {
+			return unretryableErr
+		}
 		if downloadingConcurrency > 1 {
 			downloadingConcurrency /= 2
 		} else if len(failed) == len(currentRun) && retries <= 0 {
@@ -252,16 +270,17 @@ func extractFile(tarInterpreter TarInterpreter, extractingReader io.Reader, file
 func tryExtractFiles(downloadingContext context.Context,
 	files []ReaderMaker,
 	tarInterpreter TarInterpreter,
-	downloadingConcurrency int) (failed []ReaderMaker) {
+	downloadingConcurrency int) (failed []ReaderMaker, unretryableErr error) {
 	downloadingSemaphore := semaphore.NewWeighted(int64(downloadingConcurrency))
 	crypter := ConfigureCrypter()
 	isFailed := sync.Map{}
+	var unretryableOnce sync.Once
 
 	for _, file := range files {
 		err := downloadingSemaphore.Acquire(downloadingContext, 1)
 		if err != nil {
 			tracelog.ErrorLogger.Println(err)
-			return files //Should never happen, but if we are asked to cancel - consider all files unfinished
+			return files, nil //Should never happen, but if we are asked to cancel - consider all files unfinished
 		}
 		fileClosure := file
 
@@ -286,6 +305,9 @@ func tryExtractFiles(downloadingContext context.Context,
 			if err != nil {
 				isFailed.Store(fileClosure, true)
 				tracelog.ErrorLogger.Println(err)
+				if IsUnretryableExtractionError(err) {
+					unretryableOnce.Do(func() { unretryableErr = err })
+				}
 			}
 		}()
 	}
@@ -293,14 +315,17 @@ func tryExtractFiles(downloadingContext context.Context,
 	err := downloadingSemaphore.Acquire(downloadingContext, int64(downloadingConcurrency))
 	if err != nil {
 		tracelog.ErrorLogger.Println(err)
-		return files //Should never happen, but if we are asked to cancel - consider all files unfinished
+		return files, nil //Should never happen, but if we are asked to cancel - consider all files unfinished
+	}
+	if unretryableErr != nil {
+		return nil, unretryableErr
 	}
 
 	isFailed.Range(func(failedFile, _ interface{}) bool {
 		failed = append(failed, failedFile.(ReaderMaker))
 		return true
 	})
-	return failed
+	return failed, nil
 }
 
 func readTrailingZeros(r io.Reader) error {
