@@ -27,6 +27,19 @@ func (tarInterpreter *FileTarInterpreter) unwrapRegularFileNew(fileReader io.Rea
 	}
 	defer utility.LoggedClose(localFile, "")
 	defer utility.LoggedSync(localFile, "", fsync)
+
+	// The checksum in the metadata describes the whole file, so it can only be checked where the
+	// tar entry is the whole file as well: a file written from scratch, or an existing one that
+	// the catchup unwrapper truncates before writing. An increment holds only the pages that
+	// changed, and RestoreMissingPages writes only the pages the local copy is missing, so what
+	// ends up on disk in those cases is not what was hashed.
+	verifiable := isNewFile || tarInterpreter.createNewIncrementalFiles
+	if fileDescription, ok := tarInterpreter.FilesMetadata.Files[header.Name]; ok && fileDescription.IsIncremented {
+		verifiable = false
+	}
+	verifier := tarInterpreter.newChecksumVerifier(header.Name, verifiable)
+	fileReader = verifier.wrap(fileReader)
+
 	var unwrapResult *FileUnwrapResult
 	var unwrapError error
 	if isNewFile {
@@ -36,6 +49,12 @@ func (tarInterpreter *FileTarInterpreter) unwrapRegularFileNew(fileReader io.Rea
 	}
 	if unwrapError != nil {
 		return unwrapError
+	}
+	// A skipped file was never read, so there is nothing to check.
+	if unwrapResult.FileUnwrapResultType != Skipped {
+		if err := verifier.verify(); err != nil {
+			return err
+		}
 	}
 	tarInterpreter.AddFileUnwrapResult(unwrapResult, header.Name)
 	return nil

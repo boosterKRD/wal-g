@@ -122,7 +122,14 @@ func (tarInterpreter *FileTarInterpreter) unwrapRegularFileOld(fileReader io.Rea
 	}
 	defer utility.LoggedClose(file, "")
 
-	return utility.WriteLocalFile(fileReader, fileInfo, file, fsync)
+	// Everything that reaches this point is written from start to end, so the whole file passes by
+	// and can be checked against the checksum the backup recorded for it. The incremented files,
+	// which carry changed pages rather than a whole file, returned above.
+	verifier := tarInterpreter.newChecksumVerifier(fileInfo.Name, true)
+	if err := utility.WriteLocalFile(verifier.wrap(fileReader), fileInfo, file, fsync); err != nil {
+		return err
+	}
+	return verifier.verify()
 }
 
 // Interpret extracts a tar file to disk and creates needed directories.
