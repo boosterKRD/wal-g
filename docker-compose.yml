@@ -85,6 +85,7 @@ services:
       &&  mkdir -p /export/deltarestoredeltabackupbucket
       &&  mkdir -p /export/deltarestoreoverpreviousbucket
       &&  mkdir -p /export/deltarestoreoverpreviousdeltabucket
+      &&  mkdir -p /export/deltarestorereverseunpackbucket
       &&  mkdir -p /export/failoverstoragebucket
       &&  mkdir -p /export/partialbucket
       &&  mkdir -p /export/remotebucket
@@ -470,6 +471,16 @@ services:
     <<: *pg_test_common
     container_name: wal-g_pg${PG_MAJOR}_delta_restore_fallback_test
     command: /tmp/tests/delta_restore_fallback_test.sh
+
+  pg_delta_restore_reverse_unpack_test:
+    <<: *pg_test_common
+    container_name: wal-g_pg${PG_MAJOR}_delta_restore_reverse_unpack_test
+    command: /tmp/tests/delta_restore_reverse_unpack_test.sh
+
+  pg_delta_restore_corruption_test:
+    <<: *pg_test_common
+    container_name: wal-g_pg${PG_MAJOR}_delta_restore_corruption_test
+    command: /tmp/tests/delta_restore_corruption_test.sh
 
   pg_delta_restore_delta_backup_test:
     <<: *pg_test_common
