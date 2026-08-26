@@ -472,6 +472,17 @@ services:
     container_name: wal-g_pg${PG_MAJOR}_delta_restore_fallback_test
     command: /tmp/tests/delta_restore_fallback_test.sh
 
+  pg_delta_restore_benchmark_test:
+    <<: *pg_test_common
+    container_name: wal-g_pg${PG_MAJOR}_delta_restore_benchmark_test
+    command: /tmp/tests/delta_restore_benchmark_test.sh
+    # The benchmark takes its shape from the environment, so that the same run can be made as large
+    # as the machine allows without editing the test. The defaults are in the test itself.
+    environment:
+      - "DELTA_BENCH_TABLES=${DELTA_BENCH_TABLES:-}"
+      - "DELTA_BENCH_PROFILE=${DELTA_BENCH_PROFILE:-}"
+      - "DELTA_BENCH_CHANGED_PCT=${DELTA_BENCH_CHANGED_PCT:-}"
+
   pg_delta_restore_reverse_unpack_test:
     <<: *pg_test_common
     container_name: wal-g_pg${PG_MAJOR}_delta_restore_reverse_unpack_test
