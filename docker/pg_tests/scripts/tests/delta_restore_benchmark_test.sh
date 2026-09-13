@@ -190,6 +190,9 @@ echo "  files restored         ${RESTORED}"
 if [ "${FULL_BYTES}" -gt 0 ]; then
   echo "  bytes saved            $((100 - DELTA_BYTES * 100 / FULL_BYTES))%"
 fi
+echo "----------------------------------------------------------------------"
+echo "  WAL-G's own summary of the delta restore, for comparison:"
+grep -A 10 "Delta restore summary" /tmp/delta_restore.log | sed 's/^/  /'
 echo "======================================================================"
 echo ""
 set -x
