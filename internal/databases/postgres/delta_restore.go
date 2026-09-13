@@ -1,12 +1,15 @@
 package postgres
 
 import (
+	"context"
+	"fmt"
 	"io"
 	"os"
 	"path"
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/pkg/errors"
 	"github.com/wal-g/tracelog"
@@ -56,11 +59,66 @@ func newFetchOptions(options []FetchOption) fetchOptions {
 	return result
 }
 
-// DeltaRestoreStats sums up what the comparison against the destination directory decided.
+// DeltaRestoreStats sums up what a delta restore did: what the comparison against the destination
+// directory decided about each file, and what the extraction then had to fetch. It is printed at
+// the end so that the operator can see what the delta saved.
 type DeltaRestoreStats struct {
+	// Regular files the backup describes, and their size on disk.
+	FilesInBackup      int
+	FilesInBackupBytes int64
+	// Kept as they are, because they already matched.
 	Preserved      int
-	Restored       int
 	PreservedBytes int64
+	// Fetched from the backup, sized as they end up on disk.
+	Restored      int
+	RestoredBytes int64
+	// Removed from the destination because the backup does not have them.
+	Removed int
+	// Hashed from the local disk to decide, whichever way the decision went.
+	LocallyRead      int
+	LocallyReadBytes int64
+
+	// Extraction is shared with the extraction through the context; see NewDeltaRestoreStats.
+	Extraction *internal.ExtractionStats
+	Started    time.Time
+}
+
+// NewDeltaRestoreStats starts the clock and hands out the context the extraction has to run
+// under for its part to be counted.
+func NewDeltaRestoreStats(ctx context.Context) (*DeltaRestoreStats, context.Context) {
+	stats := &DeltaRestoreStats{Extraction: &internal.ExtractionStats{}, Started: time.Now()}
+	return stats, internal.ContextWithExtractionStats(ctx, stats.Extraction)
+}
+
+// LogSummary prints the whole picture in one block at INFO level.
+func (stats *DeltaRestoreStats) LogSummary() {
+	extraction := stats.Extraction
+	cutShort := ""
+	if n := extraction.TarballsCutShort.Load(); n > 0 {
+		cutShort = fmt.Sprintf(", %d of them cut short, %s not read", n,
+			internal.FormatBytes(extraction.BytesNotRead.Load()))
+	}
+	tracelog.InfoLogger.Printf("Delta restore summary\n"+
+		"  files in backup          %6d   %s\n"+
+		"    kept as they are       %6d   %s\n"+
+		"    restored               %6d   %s\n"+
+		"    removed, not in backup %6d\n"+
+		"  read from local disk     %6d   %s\n"+
+		"  tarballs in backup chain %6d   %s\n"+
+		"    skipped entirely       %6d   %s\n"+
+		"    downloaded             %6d   %s%s\n"+
+		"  written to disk          %6d   %s\n"+
+		"  took %s",
+		stats.FilesInBackup, internal.FormatBytes(stats.FilesInBackupBytes),
+		stats.Preserved, internal.FormatBytes(stats.PreservedBytes),
+		stats.Restored, internal.FormatBytes(stats.RestoredBytes),
+		stats.Removed,
+		stats.LocallyRead, internal.FormatBytes(stats.LocallyReadBytes),
+		extraction.TarballsTotal.Load(), internal.FormatBytes(extraction.BytesTotal.Load()),
+		extraction.TarballsSkipped.Load(), internal.FormatBytes(extraction.BytesSkipped.Load()),
+		extraction.TarballsRead.Load(), internal.FormatBytes(extraction.BytesDownloaded.Load()), cutShort,
+		extraction.FilesWritten.Load(), internal.FormatBytes(extraction.BytesWritten.Load()),
+		time.Since(stats.Started).Round(time.Millisecond))
 }
 
 // ValidateDeltaRestoreTarget checks that a delta restore into dbDataDirectory is safe to attempt.
@@ -105,7 +163,7 @@ func ValidateDeltaRestoreTarget(dbDataDirectory string) (bool, error) {
 // delta restore is actually in effect; when it is not, the caller has to fall back to the usual
 // rules and restore into an empty directory.
 func prepareDeltaRestore(dbDataDirectory string, filesMeta FilesMetadataDto,
-	filesToUnwrap map[string]bool) (map[string]bool, bool, error) {
+	filesToUnwrap map[string]bool, stats *DeltaRestoreStats) (map[string]bool, bool, error) {
 	enabled, err := ValidateDeltaRestoreTarget(dbDataDirectory)
 	if err != nil || !enabled {
 		return filesToUnwrap, false, err
@@ -127,14 +185,21 @@ func prepareDeltaRestore(dbDataDirectory string, filesMeta FilesMetadataDto,
 	// Remove what is in the directory but not in the backup before anything is written. Doing it
 	// first means the restore cannot delete a file it has just put in place, and the files removed
 	// here do not have to be checksummed below.
-	if _, err := RemoveExtraFiles(dbDataDirectory, filesMeta); err != nil {
-		return nil, false, err
-	}
-
-	filesToUnwrap, _, err = SelectFilesToRestore(dbDataDirectory, filesMeta, filesToUnwrap)
+	removed, err := RemoveExtraFiles(dbDataDirectory, filesMeta)
 	if err != nil {
 		return nil, false, err
 	}
+
+	filesToUnwrap, selection, err := SelectFilesToRestore(dbDataDirectory, filesMeta, filesToUnwrap)
+	if err != nil {
+		return nil, false, err
+	}
+
+	// The extraction counters and the clock belong to the caller's object, the rest is what the
+	// selection just decided.
+	selection.Extraction, selection.Started = stats.Extraction, stats.Started
+	*stats = selection
+	stats.Removed = removed
 	return filesToUnwrap, true, nil
 }
 
@@ -359,7 +424,8 @@ func SelectFilesToRestore(dbDataDirectory string, filesMeta FilesMetadataDto,
 		go func() {
 			defer waitGroup.Done()
 			for name := range work {
-				preserve := matchesBackup(dbDataDirectory, name, filesMeta.Files[name])
+				description := filesMeta.Files[name]
+				preserve, hashed := matchesBackup(dbDataDirectory, name, description)
 				if !preserve {
 					removeStaleLocalFile(dbDataDirectory, name)
 				}
@@ -367,10 +433,19 @@ func SelectFilesToRestore(dbDataDirectory string, filesMeta FilesMetadataDto,
 				mutex.Lock()
 				if preserve {
 					stats.Preserved++
-					stats.PreservedBytes += filesMeta.Files[name].Size
+					stats.PreservedBytes += description.Size
 				} else {
-					stats.Restored++
+					// Directories and links are restored too, but they are not what anybody
+					// means by a file count.
+					if isFileEntry(name, description) {
+						stats.Restored++
+						stats.RestoredBytes += description.Size
+					}
 					result[name] = true
+				}
+				if hashed {
+					stats.LocallyRead++
+					stats.LocallyReadBytes += description.Size
 				}
 				mutex.Unlock()
 			}
@@ -382,10 +457,20 @@ func SelectFilesToRestore(dbDataDirectory string, filesMeta FilesMetadataDto,
 	close(work)
 	waitGroup.Wait()
 
+	stats.FilesInBackup = stats.Preserved + stats.Restored
+	stats.FilesInBackupBytes = stats.PreservedBytes + stats.RestoredBytes
+
 	tracelog.InfoLogger.Printf("Delta restore: %d files match the backup and are kept (%d bytes), %d files will be restored",
 		stats.Preserved, stats.PreservedBytes, stats.Restored)
 
 	return result, stats, nil
+}
+
+// isFileEntry tells a regular file of the backup from the directories and links that share the
+// metadata with it. Those have neither a checksum nor a size; a file always has at least one of
+// the two, and the utility files are files by definition.
+func isFileEntry(name string, description internal.BackupFileDescription) bool {
+	return UtilityFilePaths[name] || description.Checksum != "" || description.Size > 0
 }
 
 // removeStaleLocalFile drops the local copy of a file that is about to be restored, so that the
@@ -413,42 +498,43 @@ func removeStaleLocalFile(dbDataDirectory, name string) {
 	}
 }
 
-// matchesBackup tells whether the local copy of a file can be kept as it is.
-func matchesBackup(dbDataDirectory, name string, description internal.BackupFileDescription) bool {
+// matchesBackup tells whether the local copy of a file can be kept as it is, and whether deciding
+// that took reading the file from disk.
+func matchesBackup(dbDataDirectory, name string, description internal.BackupFileDescription) (preserve, hashed bool) {
 	// Utility files are cheap and are restored in a specific order, never keep them.
 	if UtilityFilePaths[name] {
-		return false
+		return false, false
 	}
 	if description.Checksum == "" || description.ChecksumAlgo != internal.ChecksumAlgoXXH64 {
-		return false
+		return false, false
 	}
 
 	filePath := path.Join(dbDataDirectory, name)
 	fileInfo, err := os.Stat(filePath)
 	if err != nil || fileInfo.IsDir() {
-		return false
+		return false, false
 	}
 	// A file of a different length cannot match, and this saves reading it.
 	if fileInfo.Size() != description.Size {
-		return false
+		return false, false
 	}
 	if description.Size == 0 {
 		tracelog.DebugLogger.Printf("restore file %s - exists and is zero size", filePath)
-		return true
+		return true, false
 	}
 
 	checksum, err := checksumLocalFile(filePath)
 	if err != nil {
 		tracelog.WarningLogger.Printf("Failed to checksum '%s', it will be restored: %v", filePath, err)
-		return false
+		return false, true
 	}
 	if checksum != description.Checksum {
-		return false
+		return false, true
 	}
 
 	tracelog.DebugLogger.Printf("restore file %s - exists and matches backup, checksum %s", filePath, checksum)
 	restoreMTime(filePath, description)
-	return true
+	return true, true
 }
 
 // restoreMTime puts the modification time back to what it was in the backup, so that a restored

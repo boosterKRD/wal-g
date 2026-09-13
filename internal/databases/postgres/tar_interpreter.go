@@ -34,6 +34,8 @@ type FileTarInterpreter struct {
 	// handled. It is opt-in because it relies on TarFileSets listing every entry of a tarball,
 	// which only holds for tarballs written by the PostgreSQL composers.
 	earlyStop bool
+	// stats counts the files written to disk, when somebody is collecting. Nil otherwise.
+	stats *internal.ExtractionStats
 }
 
 func NewFileTarInterpreter(
@@ -55,6 +57,11 @@ func NewFileTarInterpreter(
 // the download short.
 func (tarInterpreter *FileTarInterpreter) EnableEarlyStop() {
 	tarInterpreter.earlyStop = true
+}
+
+// SetExtractionStats makes the interpreter count what it writes into stats.
+func (tarInterpreter *FileTarInterpreter) SetExtractionStats(stats *internal.ExtractionStats) {
+	tarInterpreter.stats = stats
 }
 
 // InterestingEntryCount reports how many entries of the named tarball are going to be acted upon.
@@ -110,6 +117,9 @@ func (tarInterpreter *FileTarInterpreter) unwrapRegularFileOld(fileReader io.Rea
 	// If this file is incremental we use it's base version from incremental path
 	if haveFileDescription && tarInterpreter.Sentinel.IsIncremental() && fileDescription.IsIncremented {
 		err := ApplyFileIncrement(targetPath, fileReader, tarInterpreter.createNewIncrementalFiles, fsync)
+		if err == nil {
+			tarInterpreter.stats.AddWritten(fileInfo.Size)
+		}
 		return errors.Wrapf(err, "Interpret: failed to apply increment for '%s'", targetPath)
 	}
 	err := PrepareDirs(fileInfo.Name, targetPath)
@@ -129,7 +139,11 @@ func (tarInterpreter *FileTarInterpreter) unwrapRegularFileOld(fileReader io.Rea
 	if err := utility.WriteLocalFile(verifier.wrap(fileReader), fileInfo, file, fsync); err != nil {
 		return err
 	}
-	return verifier.verify()
+	if err := verifier.verify(); err != nil {
+		return err
+	}
+	tarInterpreter.stats.AddWritten(fileInfo.Size)
+	return nil
 }
 
 // Interpret extracts a tar file to disk and creates needed directories.

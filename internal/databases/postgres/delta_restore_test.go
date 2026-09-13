@@ -1,6 +1,7 @@
 package postgres
 
 import (
+	"context"
 	"net"
 	"os"
 	"path/filepath"
@@ -79,6 +80,24 @@ func TestValidateDeltaRestoreTarget(t *testing.T) {
 	})
 }
 
+// The summary must not fall over on an empty run, and must say what it counted.
+func TestDeltaRestoreStats_LogSummary(t *testing.T) {
+	stats, ctx := NewDeltaRestoreStats(context.Background())
+	require.NotNil(t, stats.Extraction)
+	assert.Same(t, stats.Extraction, internal.ExtractionStatsFromContext(ctx))
+
+	stats.FilesInBackup, stats.FilesInBackupBytes = 3, 3000
+	stats.Preserved, stats.PreservedBytes = 2, 2000
+	stats.Restored, stats.RestoredBytes = 1, 1000
+	stats.Removed = 4
+	stats.Extraction.AddTarball(500, false)
+	stats.Extraction.AddTarball(500, true)
+	stats.Extraction.AddRead(500, 100, true)
+
+	// Only that it does not panic: the output goes to the logger.
+	stats.LogSummary()
+}
+
 func TestSelectFilesToRestore(t *testing.T) {
 	internal.ConfigureSettings(conf.PG)
 	conf.InitConfig()
@@ -89,7 +108,7 @@ func TestSelectFilesToRestore(t *testing.T) {
 
 	dir := writePgData(t, map[string][]byte{
 		"base/1/matching":   matching,
-		"base/1/diverged":   []byte("something else entirely"),
+		"base/1/diverged":   []byte("this file DID change"),
 		"base/1/truncated":  matching[:4],
 		"base/1/empty":      {},
 		"base/1/no_hash":    matching,
@@ -126,6 +145,17 @@ func TestSelectFilesToRestore(t *testing.T) {
 	assert.Equal(t, 2, stats.Preserved)
 	assert.Equal(t, 5, stats.Restored)
 	assert.Equal(t, int64(len(matching)), stats.PreservedBytes)
+
+	var restoredBytes int64
+	for name := range selected {
+		restoredBytes += filesMeta.Files[name].Size
+	}
+	assert.Equal(t, restoredBytes, stats.RestoredBytes)
+
+	// Only files of the right length get hashed: the matching one, and the diverged one, which is
+	// the same length but different. The rest were decided without reading them.
+	assert.Equal(t, 2, stats.LocallyRead)
+	assert.Equal(t, int64(len(matching)+len(diverged)), stats.LocallyReadBytes)
 }
 
 // A file that is kept gets the modification time it had in the backup, so that the restored

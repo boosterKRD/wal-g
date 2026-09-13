@@ -187,6 +187,24 @@ The cluster must be stopped: WAL-G refuses to run if `postmaster.pid` is present
 
 How much this saves depends on how the changed files are spread across backup bundles: a bundle is downloaded only if at least one of the files in it has to be restored, and its download is cut short once the last needed file has been read out of it. Large files get a bundle of their own (see `WALG_TAR_DEDICATED_FILE_SIZE`), so for a database with big tables the saving is close to the share of unchanged data.
 
+What a delta restore saved is printed at the end:
+
+```
+INFO: Delta restore summary
+  files in backup            1326   1.9 GiB
+    kept as they are          933   1.2 GiB
+    restored                  393   712.4 MiB
+    removed, not in backup     15
+  read from local disk        940   1.2 GiB
+  tarballs in backup chain     12   58.4 MiB
+    skipped entirely            8   45.2 MiB
+    downloaded                  4   13.3 MiB, 2 of them cut short, 3.0 MiB not read
+  written to disk             393   712.4 MiB
+  took 1.48s
+```
+
+Tarball sizes are as they are in storage, compressed; file sizes are as on disk. `read from local disk` is how much was hashed to decide what to keep: files of a different length are decided without reading them. For an incremental backup `restored` counts whole files while `written to disk` counts the increments actually applied, so the two differ. With `WALG_LOG_LEVEL=DEVEL` every downloaded tarball is reported on its own line as well.
+
 Anything in the destination directory that is not in the backup is **removed** before the restore starts:
 
 ```

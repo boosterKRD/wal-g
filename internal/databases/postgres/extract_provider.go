@@ -27,12 +27,12 @@ func (t ExtractProviderImpl) Get(
 	dbDataDir string,
 	createNewIncrementalFiles bool,
 ) (IncrementalTarInterpreter, []internal.ReaderMaker, []internal.ReaderMaker, error) {
-	interpreter := t.getTarInterpreter(dbDataDir, backup, filesToUnwrap, createNewIncrementalFiles, skipRedundantTars)
+	interpreter := t.getTarInterpreter(ctx, dbDataDir, backup, filesToUnwrap, createNewIncrementalFiles, skipRedundantTars)
 	concurrentTarsToExtract, sequentialTarsToExtract, err := t.FilesToExtractProviderImpl.Get(ctx, backup, filesToUnwrap, skipRedundantTars)
 	return interpreter, concurrentTarsToExtract, sequentialTarsToExtract, err
 }
 
-func (t ExtractProviderImpl) getTarInterpreter(dbDataDir string, backup Backup,
+func (t ExtractProviderImpl) getTarInterpreter(ctx context.Context, dbDataDir string, backup Backup,
 	filesToUnwrap map[string]bool, createNewIncrementalFiles, earlyStop bool) IncrementalTarInterpreter {
 	interpreter := NewFileTarInterpreter(dbDataDir, *backup.SentinelDto, *backup.FilesMetadataDto,
 		filesToUnwrap, createNewIncrementalFiles)
@@ -41,5 +41,6 @@ func (t ExtractProviderImpl) getTarInterpreter(dbDataDir string, backup Backup,
 		// that do to be read only as far as they have to be.
 		interpreter.EnableEarlyStop()
 	}
+	interpreter.SetExtractionStats(internal.ExtractionStatsFromContext(ctx))
 	return interpreter
 }

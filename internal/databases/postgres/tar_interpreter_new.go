@@ -50,11 +50,12 @@ func (tarInterpreter *FileTarInterpreter) unwrapRegularFileNew(fileReader io.Rea
 	if unwrapError != nil {
 		return unwrapError
 	}
-	// A skipped file was never read, so there is nothing to check.
+	// A skipped file was never read, so there is nothing to check and nothing to count.
 	if unwrapResult.FileUnwrapResultType != Skipped {
 		if err := verifier.verify(); err != nil {
 			return err
 		}
+		tarInterpreter.stats.AddWritten(header.Size)
 	}
 	tarInterpreter.AddFileUnwrapResult(unwrapResult, header.Name)
 	return nil

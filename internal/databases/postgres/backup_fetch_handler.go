@@ -126,16 +126,21 @@ func GetFetcherOld(dbDataDirectory, fileMask, restoreSpecPath string, extractPro
 
 		dataDirectory := utility.ResolveSymlink(dbDataDirectory)
 		deltaRestore := false
+		var stats *DeltaRestoreStats
 		if fetchOpts.deltaRestore {
 			_, filesMeta, err := pgBackup.GetSentinelAndFilesMetadata(ctx)
 			tracelog.ErrorLogger.FatalfOnError("Failed to fetch backup: %v\n", err)
 
-			filesToUnwrap, deltaRestore, err = prepareDeltaRestore(dataDirectory, filesMeta, filesToUnwrap)
+			stats, ctx = NewDeltaRestoreStats(ctx)
+			filesToUnwrap, deltaRestore, err = prepareDeltaRestore(dataDirectory, filesMeta, filesToUnwrap, stats)
 			tracelog.ErrorLogger.FatalfOnError("Failed to fetch backup: %v\n", err)
 		}
 
 		err = deltaFetchRecursionOld(ctx, pgBackup, rootFolder, dataDirectory, spec, filesToUnwrap, extractProv, deltaRestore)
 		tracelog.ErrorLogger.FatalfOnError("Failed to fetch backup: %v\n", err)
+		if deltaRestore {
+			stats.LogSummary()
+		}
 	}
 }
 

@@ -249,7 +249,8 @@ func ExtractAllWithSleeper(ctx context.Context, tarInterpreter TarInterpreter, f
 // Extract single file from backup
 // If it is .tar file unpack it and store internal files (there will be .tar file if you work with wal-g backup)
 // Otherwise store this file (there will be regular file if you work with pgbackrest backup)
-func extractFile(tarInterpreter TarInterpreter, extractingReader io.Reader, fileClosure ReaderMaker) error {
+// It reports whether reading was stopped before the end of the file.
+func extractFile(tarInterpreter TarInterpreter, extractingReader io.Reader, fileClosure ReaderMaker) (bool, error) {
 	switch fileClosure.FileType() {
 	case TarFileType:
 		stoppedEarly, err := extractOneTarUntilDone(tarInterpreter, extractingReader, fileClosure.StoragePath())
@@ -257,12 +258,12 @@ func extractFile(tarInterpreter TarInterpreter, extractingReader io.Reader, file
 		if err == nil && !stoppedEarly {
 			err = readTrailingZeros(extractingReader)
 		}
-		return err
+		return stoppedEarly, err
 	case RegularFileType:
-		return extractNonTar(tarInterpreter, extractingReader, fileClosure.LocalPath(), fileClosure.FileType(), fileClosure.Mode())
+		return false, extractNonTar(tarInterpreter, extractingReader, fileClosure.LocalPath(), fileClosure.FileType(), fileClosure.Mode())
 	default:
 		tracelog.InfoLogger.Print()
-		return errors.New("Unknown fileType " + string(fileClosure.FileType()))
+		return false, errors.New("Unknown fileType " + string(fileClosure.FileType()))
 	}
 }
 
@@ -275,6 +276,7 @@ func tryExtractFiles(downloadingContext context.Context,
 	crypter := ConfigureCrypter()
 	isFailed := sync.Map{}
 	var unretryableOnce sync.Once
+	stats := ExtractionStatsFromContext(downloadingContext)
 
 	for _, file := range files {
 		err := downloadingSemaphore.Acquire(downloadingContext, 1)
@@ -289,16 +291,22 @@ func tryExtractFiles(downloadingContext context.Context,
 
 			readCloser, err := fileClosure.Reader(downloadingContext)
 			if err == nil {
-				defer utility.LoggedClose(readCloser, "")
+				// Counted before decompression, so what is counted is what came out of storage.
+				downloaded := &countingReadCloser{ReadCloser: readCloser}
+				defer utility.LoggedClose(downloaded, "")
 
 				filePath := fileClosure.StoragePath()
 				var extractingReader io.ReadCloser
-				extractingReader, err = DecryptAndDecompressTar(downloadingContext, readCloser, filePath, crypter)
+				extractingReader, err = DecryptAndDecompressTar(downloadingContext, downloaded, filePath, crypter)
 				if err == nil {
 					defer extractingReader.Close()
-					err = extractFile(tarInterpreter, extractingReader, fileClosure)
+					var stoppedEarly bool
+					stoppedEarly, err = extractFile(tarInterpreter, extractingReader, fileClosure)
 					err = errors.Wrapf(err, "Extraction error in %s", filePath)
 					tracelog.InfoLogger.Printf("Finished extraction of %s", filePath)
+					if err == nil {
+						recordExtraction(stats, fileClosure, downloaded.count.Load(), stoppedEarly)
+					}
 				}
 			}
 
@@ -326,6 +334,26 @@ func tryExtractFiles(downloadingContext context.Context,
 		return true
 	})
 	return failed, nil
+}
+
+// recordExtraction feeds one finished tarball into the stats. The size in storage is only known
+// for readers made from a listing; without it the unread remainder cannot be told.
+func recordExtraction(stats *ExtractionStats, fileClosure ReaderMaker, downloaded int64, stoppedEarly bool) {
+	if stats == nil {
+		return
+	}
+	var size int64
+	if sized, ok := fileClosure.(interface{ StorageSize() int64 }); ok {
+		size = sized.StorageSize()
+	}
+	stats.AddRead(size, downloaded, stoppedEarly)
+
+	if stoppedEarly {
+		tracelog.DebugLogger.Printf("%s: read %s of %s, stopped early",
+			fileClosure.StoragePath(), FormatBytes(downloaded), FormatBytes(size))
+	} else {
+		tracelog.DebugLogger.Printf("%s: read %s", fileClosure.StoragePath(), FormatBytes(downloaded))
+	}
 }
 
 func readTrailingZeros(r io.Reader) error {
